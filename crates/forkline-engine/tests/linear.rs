@@ -1,0 +1,270 @@
+//! Linear plan execution: success, module errors, deadlines, terminal failure, reload.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use forkline_core::{
+    Build, BuildError, Ctx, Decode, Empty, Encode, ErrorKind, Module, NoConfig, NodeError, PlanError, Registry, Reply,
+    Status, Terminal,
+};
+use forkline_engine::{Engine, EngineError, Request};
+use forkline_macros::interface;
+use forkline_plan::PlansFile;
+use serde::Deserialize;
+use tokio::time::Instant;
+use tower::ServiceExt;
+
+interface! {
+    #[forkline(crate = forkline_core)]
+    pub struct BodyIo { out payload: Bytes }
+}
+interface! {
+    #[forkline(crate = forkline_core)]
+    pub struct TextIo { inout text: String, in payload: Bytes }
+}
+interface! {
+    #[forkline(crate = forkline_core)]
+    pub struct OutIo { in text: String }
+}
+
+struct BodyDecoder;
+impl Build for BodyDecoder {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Decode for BodyDecoder {
+    type Io<'a> = BodyIo<'a>;
+    fn decode(&self, _: &Ctx, body: &Bytes, mut io: BodyIo<'_>) -> Result<(), NodeError> {
+        if body.as_ref() == b"bad" {
+            return Err(NodeError::bad_request("body must not be `bad`"));
+        }
+        io.set_payload(body.clone());
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct AppendConfig {
+    suffix: String,
+    sleep_ms: u64,
+    fail: bool,
+}
+
+/// Appends `suffix` to `text` (seeding it from `payload`), optionally sleeping or failing.
+struct Append(AppendConfig);
+impl Build for Append {
+    type Config = AppendConfig;
+    fn build(c: AppendConfig) -> Result<Self, BuildError> {
+        Ok(Self(c))
+    }
+}
+impl Module for Append {
+    type Io<'a> = TextIo<'a>;
+    async fn call(&self, _: &Ctx, mut io: TextIo<'_>) -> Result<(), NodeError> {
+        if self.0.sleep_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(self.0.sleep_ms)).await;
+        }
+        if self.0.fail {
+            return Err(NodeError::msg("append failed on purpose"));
+        }
+        if io.text().is_none() {
+            let seed = String::from_utf8_lossy(io.payload().map_or(&[][..], |b| b.as_ref())).into_owned();
+            io.set_text(seed);
+        }
+        if let Some(text) = io.text_mut() {
+            text.push_str(&self.0.suffix);
+        }
+        Ok(())
+    }
+}
+
+struct TextEncoder;
+impl Build for TextEncoder {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Encode for TextEncoder {
+    type Io<'a> = OutIo<'a>;
+    fn encode(&self, _: &Ctx, io: OutIo<'_>) -> Result<Reply, NodeError> {
+        Ok(Reply::ok(io.text().cloned().unwrap_or_default()))
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct ErrConfig {
+    fail: bool,
+}
+struct ErrorReply(ErrConfig);
+impl Build for ErrorReply {
+    type Config = ErrConfig;
+    fn build(c: ErrConfig) -> Result<Self, BuildError> {
+        Ok(Self(c))
+    }
+}
+impl Terminal for ErrorReply {
+    type Io<'a> = Empty<'a>;
+    fn respond(&self, _: &Ctx, _: Empty<'_>, e: &PlanError) -> Result<Reply, NodeError> {
+        if self.0.fail {
+            return Err(NodeError::msg("terminal broke"));
+        }
+        Ok(Reply::error(e.kind, format!("{}: {}", e.node, e.message)))
+    }
+}
+
+fn registry() -> Arc<Registry> {
+    Arc::new(
+        Registry::builder()
+            .decode::<BodyDecoder>("BodyDecoder")
+            .module::<Append>("Append")
+            .encode::<TextEncoder>("TextEncoder")
+            .terminal::<ErrorReply>("ErrorReply")
+            .build()
+            .unwrap(),
+    )
+}
+
+fn plans(a: &str, b: &str, terminal: &str, budget_ms: u64) -> PlansFile {
+    PlansFile::from_toml_str(&format!(
+        r#"
+        [plans.p]
+        root = "decode"
+        terminal = "error"
+        time_budget_ms = {budget_ms}
+        links = ["decode -> a", "a -> b", "b -> encode"]
+        [plans.p.nodes]
+        decode = {{ module = "BodyDecoder" }}
+        a      = {{ module = "Append", config = {a} }}
+        b      = {{ module = "Append", config = {b} }}
+        encode = {{ module = "TextEncoder" }}
+        error  = {{ module = "ErrorReply", config = {terminal} }}
+        "#
+    ))
+    .unwrap()
+}
+
+fn engine(a: &str, b: &str) -> Engine {
+    Engine::new(registry(), &plans(a, b, "{}", 100)).unwrap()
+}
+
+#[tokio::test]
+async fn a_chain_runs_in_order() {
+    let e = engine(r#"{ suffix = "-a" }"#, r#"{ suffix = "-b" }"#);
+    let reply = e.call("p", Request::in_process("hi")).await.unwrap();
+    assert_eq!(reply.status, Status::Ok);
+    assert_eq!(reply.body, Bytes::from("hi-a-b"));
+}
+
+#[tokio::test]
+async fn module_errors_reach_the_terminal() {
+    let e = engine(r#"{ suffix = "-a" }"#, "{ fail = true }");
+    let reply = e.call("p", Request::in_process("hi")).await.unwrap();
+    assert_eq!(reply.status, Status::Error(ErrorKind::Module));
+    assert_eq!(reply.body, Bytes::from("b: append failed on purpose"));
+}
+
+#[tokio::test]
+async fn bad_requests_keep_their_kind() {
+    let e = engine("{}", "{}");
+    let reply = e.call("p", Request::in_process("bad")).await.unwrap();
+    assert_eq!(reply.status, Status::Error(ErrorKind::BadRequest));
+    assert_eq!(reply.body, Bytes::from("decode: body must not be `bad`"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_time_budget_is_enforced() {
+    let e = engine("{ sleep_ms = 60 }", "{ sleep_ms = 60 }");
+    let started = Instant::now();
+    let reply = e.call("p", Request::in_process("hi")).await.unwrap();
+    assert_eq!(reply.status, Status::Error(ErrorKind::Deadline));
+    assert_eq!(reply.body, Bytes::from("b: deadline passed while the node was running"));
+    assert_eq!(started.elapsed(), Duration::from_millis(100), "stopped exactly at the 100 ms budget");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_earlier_inbound_deadline_wins() {
+    let e = engine("{ sleep_ms = 30 }", "{}");
+    let mut req = Request::in_process("hi");
+    req.env.inbound_deadline = Some(req.env.received_at + Duration::from_millis(10));
+    let reply = e.call("p", req).await.unwrap();
+    assert_eq!(reply.status, Status::Error(ErrorKind::Deadline));
+    assert!(reply.body.starts_with(b"a: "));
+}
+
+#[tokio::test]
+async fn a_failing_terminal_is_an_engine_error() {
+    let e = Engine::new(registry(), &plans("{ fail = true }", "{}", "{ fail = true }", 100)).unwrap();
+    let err = e.call("p", Request::in_process("hi")).await.unwrap_err();
+    match err {
+        EngineError::TerminalFailed { error, terminal, message } => {
+            assert_eq!(&*terminal, "error");
+            assert_eq!(message, "terminal broke");
+            assert_eq!(&*error.node, "a");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unknown_plans_are_refused() {
+    let e = engine("{}", "{}");
+    assert!(matches!(
+        e.call("nope", Request::in_process("")).await,
+        Err(EngineError::UnknownPlan(p)) if p == "nope"
+    ));
+}
+
+#[tokio::test]
+async fn the_plan_is_a_tower_service() {
+    let e = Arc::new(engine(r#"{ suffix = "!" }"#, "{}"));
+    let reply = e.plan_service("p").oneshot(Request::in_process("svc")).await.unwrap();
+    assert_eq!(reply.body, Bytes::from("svc!"));
+}
+
+#[tokio::test]
+async fn forks_are_refused_until_phase_2() {
+    let text = r#"
+        [plans.f]
+        root = "decode"
+        terminal = "error"
+        links = ["decode -> a", "decode -> b", "a -> encode"]
+        [plans.f.nodes]
+        decode = { module = "BodyDecoder" }
+        a      = { module = "Append" }
+        b      = { module = "Append" }
+        encode = { module = "TextEncoder" }
+        error  = { module = "ErrorReply" }
+    "#;
+    let err = Engine::new(registry(), &PlansFile::from_toml_str(text).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("phase 2"), "{err}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn reload_swaps_plans_and_in_flight_requests_keep_their_snapshot() {
+    let e = Arc::new(engine(r#"{ suffix = "-old", sleep_ms = 20 }"#, "{}"));
+    let in_flight = tokio::spawn({
+        let e = e.clone();
+        async move { e.call("p", Request::in_process("x")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let version = e.reload(&plans(r#"{ suffix = "-new" }"#, "{}", "{}", 100)).unwrap();
+    assert_eq!(version, 2);
+
+    let fresh = e.call("p", Request::in_process("x")).await.unwrap();
+    assert_eq!(fresh.body, Bytes::from("x-new"));
+    let old = in_flight.await.unwrap().unwrap();
+    assert_eq!(old.body, Bytes::from("x-old"), "the in-flight request finished on the snapshot it pinned");
+
+    // A bad reload leaves the running snapshot in place.
+    let broken = PlansFile::from_toml_str("[plans.p]\nroot = \"x\"\nterminal = \"y\"\nnodes = {}\n").unwrap();
+    assert!(e.reload(&broken).is_err());
+    assert_eq!(e.snapshot().version, 2);
+}

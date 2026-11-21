@@ -1,0 +1,11 @@
+[[http]]
+addr = "127.0.0.1:8080"
+routes = { "/echo" = "echo", "/slow" = "slow" }
+
+[[grpc]]
+addr = "127.0.0.1:50051"
+methods = { Echo = "echo", Slow = "slow" }
+
+[telemetry]
+log_format = "text"
+filter = "info"

@@ -1,0 +1,5 @@
+error: key `name` is declared twice
+ --> tests/ui/duplicate_key.rs:2:42
+  |
+2 |     pub struct Io { in name: String, out name: String }
+  |                                          ^^^^

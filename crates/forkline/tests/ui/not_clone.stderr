@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `Handle: Clone` is not satisfied
+ --> tests/ui/not_clone.rs:3:32
+  |
+3 |     pub struct Io { in handle: Handle }
+  |                                ^^^^^^ the trait `Clone` is not implemented for `Handle`
+  |
+note: required by a bound in `forkline::__rt::assert_map_value`
+ --> $WORKSPACE/crates/forkline-core/src/lib.rs
+  |
+  |     pub const fn assert_map_value<T: Clone + Send + Sync + 'static>() {}
+  |                                      ^^^^^ required by this bound in `assert_map_value`
+help: consider annotating `Handle` with `#[derive(Clone)]`
+  |
+1 + #[derive(Clone)]
+2 | struct Handle;
+  |

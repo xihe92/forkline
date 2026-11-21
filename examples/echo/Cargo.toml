@@ -1,0 +1,30 @@
+[package]
+name = "forkline-echo"
+description = "Phase 1 example: an echo plan served over HTTP and gRPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "forkline-echo"
+path = "src/main.rs"
+
+[dependencies]
+bytes.workspace = true
+forkline.workspace = true
+forkline-server.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["http2"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-util.workspace = true
+tonic.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
