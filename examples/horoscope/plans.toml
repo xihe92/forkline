@@ -1,0 +1,23 @@
+# One request: decode, then in parallel look up the time and, depending on
+# `want`, a horoscope or a stock quote; join the paths and encode JSON.
+[plans.qp1]
+root = "request"
+terminal = "error"
+time_budget_ms = 80
+on_conflict = "error"
+links = [
+  "request -> time", "request -> branch",
+  "branch -> horoscope : horoscope", "branch -> stock : stock",
+  "time -> join", "horoscope -> join", "stock -> join",
+  "join -> response",
+]
+
+[plans.qp1.nodes]
+request   = { module = "RequestDecoder" }
+time      = { module = "TimeLookup", rename = { svc_response = "time_response" }, config = { service = "time" } }
+branch    = { module = "SelectBranch" }
+horoscope = { module = "HoroscopeLookup", config = { service = "horoscope" } }
+stock     = { module = "StockLookup", config = { service = "stock" } }
+join      = { module = "ConcatJoin" }
+response  = { module = "ResponseEncoder" }
+error     = { module = "ErrorEncoder" }

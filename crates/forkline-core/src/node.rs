@@ -20,14 +20,64 @@ use crate::ctx::Ctx;
 use crate::error::{BuildError, NodeError, PlanError};
 use crate::map::{RequestMap, Slot};
 use crate::reply::Reply;
+use crate::service::ServiceRegistry;
+
+/// What a module may use while it is being built: its location in the plan
+/// and the snapshot's services.
+#[derive(Clone, Copy)]
+pub struct BuildContext<'a> {
+    /// Plan name.
+    pub plan: &'a str,
+    /// Node name.
+    pub node: &'a str,
+    services: &'a ServiceRegistry,
+}
+
+impl<'a> BuildContext<'a> {
+    /// A build context for `node` in `plan`.
+    pub fn new(plan: &'a str, node: &'a str, services: &'a ServiceRegistry) -> Self {
+        Self { plan, node, services }
+    }
+
+    /// Resolve a service by name and type. A missing or mistyped service
+    /// rejects the plan at load time.
+    pub fn service<T: Clone + Send + Sync + 'static>(&self, name: &str) -> Result<T, BuildError> {
+        self.services.get::<T>(name).map_err(|e| BuildError::msg(e.to_string()))
+    }
+
+    /// All services.
+    pub fn services(&self) -> &'a ServiceRegistry {
+        self.services
+    }
+}
+
+impl std::fmt::Debug for BuildContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildContext").field("plan", &self.plan).field("node", &self.node).finish()
+    }
+}
 
 /// How a module is constructed from the `config` table of its plan node.
+///
+/// Implement [`build`](Self::build), or [`build_with`](Self::build_with) when
+/// the module needs services; the engine calls `build_with`, which defaults
+/// to `build`.
 pub trait Build: Sized + Send + Sync + 'static {
     /// The module's config type. Use [`NoConfig`] when there is none.
     type Config: DeserializeOwned;
 
     /// Build the module. Called once per plan load, never per request.
-    fn build(config: Self::Config) -> Result<Self, BuildError>;
+    fn build(config: Self::Config) -> Result<Self, BuildError> {
+        let _ = config;
+        Err(BuildError::msg(format!("{} implements neither build nor build_with", std::any::type_name::<Self>())))
+    }
+
+    /// Build the module with access to services. Resolve service handles
+    /// here so a missing service fails at load, not on the first request.
+    fn build_with(config: Self::Config, cx: &BuildContext<'_>) -> Result<Self, BuildError> {
+        let _ = cx;
+        Self::build(config)
+    }
 }
 
 /// Config type for modules that take no configuration. Rejects unknown keys.

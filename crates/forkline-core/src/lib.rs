@@ -16,15 +16,17 @@ pub mod map;
 pub mod node;
 pub mod registry;
 pub mod reply;
+pub mod service;
 
 pub use contract::{Access, Empty, Interface, KeySpec};
-pub use ctx::{Ctx, Protocol, RequestEnv, RequestId};
+pub use ctx::{Ctx, CtxParts, MAX_PLAN_DEPTH, PlanRunner, Protocol, RequestEnv, RequestId};
 pub use error::{BuildError, ErrorKind, NodeError, PlanError};
 pub use fixedbitset::FixedBitSet;
 pub use map::{RequestMap, Slot};
-pub use node::{Branch, Build, Decode, Encode, Join, JoinStep, Module, MultiBranch, NoConfig, Terminal};
+pub use node::{Branch, Build, BuildContext, Decode, Encode, Join, JoinStep, Module, MultiBranch, NoConfig, Terminal};
 pub use registry::{NodeImpl, NodeKind, Registry, RegistryBuilder, RegistryEntry, RegistryError};
 pub use reply::{Reply, Status};
+pub use service::{ServiceLookupError, ServiceRegistry};
 
 /// Items the `interface!` macro expands to. Not part of the public API.
 #[doc(hidden)]

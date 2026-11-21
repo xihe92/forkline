@@ -1,0 +1,10 @@
+[[http]]
+addr = "127.0.0.1:8080"
+routes = { "/query" = "qp1" }
+
+[[grpc]]
+addr = "127.0.0.1:50051"
+methods = { Query = "qp1" }
+
+[telemetry]
+log_format = "text"

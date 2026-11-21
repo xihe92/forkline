@@ -281,3 +281,116 @@ fn duplicate_registration_fails() {
     let err = Registry::builder().decode::<Dec>("X").module::<Work>("X").build().unwrap_err();
     assert!(err.to_string().contains('X'));
 }
+
+interface! {
+    #[forkline(crate = forkline_core)]
+    pub struct ReadsIo {
+        in svc_response: String,
+    }
+}
+
+interface! {
+    #[forkline(crate = forkline_core)]
+    pub struct UnsetIo {
+        unset svc_response: String,
+    }
+}
+
+struct Reads;
+impl Build for Reads {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Reads)
+    }
+}
+impl Module for Reads {
+    type Io<'a> = ReadsIo<'a>;
+    async fn call(&self, _: &Ctx, _: ReadsIo<'_>) -> Result<(), NodeError> {
+        Ok(())
+    }
+}
+
+struct Clear;
+impl Build for Clear {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Clear)
+    }
+}
+impl Module for Clear {
+    type Io<'a> = UnsetIo<'a>;
+    async fn call(&self, _: &Ctx, mut io: UnsetIo<'_>) -> Result<(), NodeError> {
+        io.unset_svc_response();
+        Ok(())
+    }
+}
+
+fn flow_registry() -> Registry {
+    Registry::builder()
+        .decode::<Dec>("Dec")
+        .module::<Work>("Work")
+        .module::<Reads>("Reads")
+        .module::<Clear>("Clear")
+        .join::<J>("J")
+        .encode::<Enc>("Enc")
+        .terminal::<Err0>("Err")
+        .build()
+        .unwrap()
+}
+
+fn flow_errors(links: &str, nodes: &str) -> Vec<String> {
+    let text = format!(
+        "[plans.p]\nroot = \"decode\"\nterminal = \"error\"\nlinks = [{links}]\n[plans.p.nodes]\n\
+         decode = {{ module = \"Dec\" }}\nencode = {{ module = \"Enc\" }}\nerror = {{ module = \"Err\" }}\n{nodes}"
+    );
+    let file = PlansFile::from_toml_str(&text).unwrap();
+    match compile_all(&file, &flow_registry()) {
+        Ok(_) => Vec::new(),
+        Err(d) => d.iter().map(ToString::to_string).collect(),
+    }
+}
+
+#[test]
+fn reads_need_an_upstream_write() {
+    // `encode` reads svc_response, but nothing writes it.
+    let e = flow_errors(r#""decode -> encode""#, "");
+    assert_eq!(
+        e,
+        vec![
+            "plan `p`, node `encode`: reads `svc_response`, but it is not written upstream on every path \
+             (declare it `opt` if it may be absent)"
+        ]
+    );
+    // Written upstream: fine.
+    assert!(flow_errors(r#""decode -> w", "w -> encode""#, r#"w = { module = "Work" }"#).is_empty());
+}
+
+#[test]
+fn an_unset_removes_a_key_from_what_is_available() {
+    let e = flow_errors(
+        r#""decode -> w", "w -> c", "c -> encode""#,
+        "w = { module = \"Work\" }\nc = { module = \"Clear\" }",
+    );
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("node `encode`: reads `svc_response`"), "{e:?}");
+}
+
+#[test]
+fn reads_before_the_write_on_the_same_path_are_caught() {
+    let e = flow_errors(
+        r#""decode -> r", "r -> w", "w -> encode""#,
+        "r = { module = \"Reads\" }\nw = { module = \"Work\" }",
+    );
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("node `r`: reads `svc_response`"), "{e:?}");
+}
+
+#[test]
+fn a_join_sees_the_union_of_its_paths() {
+    // One fork path writes svc_response, the other does not; after the join it is available.
+    let e = flow_errors(
+        r#""decode -> w", "decode -> r0", "w -> j", "r0 -> j", "j -> encode""#,
+        "w = { module = \"Work\" }\nr0 = { module = \"Clear\" }\nj = { module = \"J\" }",
+    );
+    assert!(e.is_empty(), "{e:?}");
+}

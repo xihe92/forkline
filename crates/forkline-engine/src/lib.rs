@@ -36,8 +36,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use forkline_core::{Ctx, PlanError, Registry, Reply, RequestEnv, RequestId};
-use forkline_plan::{CompiledPlan, Diagnostics, PlansFile, compile_all};
+use forkline_core::node::BoxFuture;
+use forkline_core::{
+    Ctx, CtxParts, NodeError, PlanError, PlanRunner, Registry, Reply, RequestEnv, RequestId, ServiceRegistry,
+};
+use forkline_plan::{CompiledPlan, Diagnostics, PlansFile, compile_all_with};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
@@ -79,26 +82,62 @@ pub enum EngineError {
     },
 }
 
-/// An immutable set of compiled plans.
+/// An immutable set of compiled plans and the services they were built with.
 #[derive(Debug)]
 pub struct Snapshot {
     /// Increases by one on every successful load.
     pub version: u64,
     /// Plans by name.
-    pub plans: BTreeMap<String, Arc<ExecPlan>>,
+    pub plans: Arc<BTreeMap<String, Arc<ExecPlan>>>,
+    /// Services available to modules.
+    pub services: Arc<ServiceRegistry>,
+    runner: Arc<SnapshotRunner>,
 }
 
 impl Snapshot {
-    fn build(version: u64, file: &PlansFile, registry: &Registry) -> Result<Self, Diagnostics> {
-        let compiled = compile_all(file, registry)?;
-        let plans = compiled
+    fn build(
+        version: u64,
+        file: &PlansFile,
+        registry: &Registry,
+        services: Arc<ServiceRegistry>,
+        detached: &TaskTracker,
+    ) -> Result<Self, Diagnostics> {
+        let compiled = compile_all_with(file, registry, &services)?;
+        let plans: BTreeMap<String, Arc<ExecPlan>> = compiled
             .into_iter()
             .map(|(name, plan)| {
                 let plan: CompiledPlan = Arc::try_unwrap(plan).unwrap_or_else(|shared| (*shared).clone());
                 (name, Arc::new(ExecPlan::new(plan)))
             })
             .collect();
-        Ok(Self { version, plans })
+        let plans = Arc::new(plans);
+        let runner = Arc::new(SnapshotRunner { plans: plans.clone(), detached: detached.clone() });
+        Ok(Self { version, plans, services, runner })
+    }
+}
+
+/// Runs subplans against the snapshot the request pinned.
+#[derive(Debug)]
+struct SnapshotRunner {
+    plans: Arc<BTreeMap<String, Arc<ExecPlan>>>,
+    detached: TaskTracker,
+}
+
+impl PlanRunner for SnapshotRunner {
+    fn run_plan<'a>(&'a self, cx: Ctx, plan: &'a str, body: Bytes) -> BoxFuture<'a, Result<Reply, NodeError>> {
+        Box::pin(async move {
+            let exec =
+                self.plans.get(plan).cloned().ok_or_else(|| NodeError::internal(format!("unknown plan `{plan}`")))?;
+            let span = cx.span().clone();
+            exec::run(exec, cx, body, &self.detached)
+                .instrument(span)
+                .await
+                .map_err(|e| NodeError::internal(e.to_string()))
+        })
+    }
+
+    fn time_budget(&self, plan: &str) -> Option<std::time::Duration> {
+        self.plans.get(plan).map(|p| p.compiled.time_budget)
     }
 }
 
@@ -112,15 +151,20 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Compile `plans` against `registry`. Fails with every problem found.
+    /// Compile `plans` against `registry`, with no services. Fails with every problem found.
     pub fn new(registry: Arc<Registry>, plans: &PlansFile) -> Result<Self, Diagnostics> {
-        let snapshot = Snapshot::build(1, plans, &registry)?;
-        Ok(Self {
-            registry,
-            current: ArcSwap::from_pointee(snapshot),
-            next_request: AtomicU64::new(1),
-            detached: TaskTracker::new(),
-        })
+        Self::with_services(registry, plans, Arc::new(ServiceRegistry::new()))
+    }
+
+    /// Compile `plans` against `registry`; modules may resolve `services` while they are built.
+    pub fn with_services(
+        registry: Arc<Registry>,
+        plans: &PlansFile,
+        services: Arc<ServiceRegistry>,
+    ) -> Result<Self, Diagnostics> {
+        let detached = TaskTracker::new();
+        let snapshot = Snapshot::build(1, plans, &registry, services, &detached)?;
+        Ok(Self { registry, current: ArcSwap::from_pointee(snapshot), next_request: AtomicU64::new(1), detached })
     }
 
     /// The current snapshot.
@@ -137,11 +181,22 @@ impl Engine {
     /// snapshot stays in place. Requests already running keep the snapshot
     /// they started with.
     pub fn reload(&self, plans: &PlansFile) -> Result<u64, Diagnostics> {
+        let services = self.current.load().services.clone();
+        self.reload_with_services(plans, services)
+    }
+
+    /// Like [`reload`](Self::reload), replacing the services as well.
+    pub fn reload_with_services(&self, plans: &PlansFile, services: Arc<ServiceRegistry>) -> Result<u64, Diagnostics> {
         let version = self.current.load().version + 1;
-        let snapshot = Snapshot::build(version, plans, &self.registry)?;
-        self.current.store(Arc::new(snapshot));
-        tracing::info!(version, "plans reloaded");
+        let snapshot = Snapshot::build(version, plans, &self.registry, services, &self.detached)?;
+        self.swap(snapshot);
         Ok(version)
+    }
+
+    fn swap(&self, snapshot: Snapshot) {
+        let version = snapshot.version;
+        self.current.store(Arc::new(snapshot));
+        tracing::info!(version, "snapshot swapped in");
     }
 
     /// A `tower::Service` that runs one plan.
@@ -176,7 +231,17 @@ impl Engine {
             plan = %exec.compiled.name,
             snapshot_version = snapshot.version,
         );
-        let cx = Ctx::new(id, exec.compiled.name.clone(), span.clone(), deadline, CancellationToken::new(), env);
+        let cx = Ctx::from_parts(CtxParts {
+            request_id: id,
+            plan: exec.compiled.name.clone(),
+            span: span.clone(),
+            deadline,
+            cancel: CancellationToken::new(),
+            env,
+            services: snapshot.services.clone(),
+            runner: Some(snapshot.runner.clone()),
+            depth: 0,
+        });
         exec::run(exec, cx, body, &self.detached).instrument(span).await
     }
 }

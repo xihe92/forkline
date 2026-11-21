@@ -13,6 +13,7 @@ clap.workspace = true
 forkline-core.workspace = true
 forkline-engine.workspace = true
 forkline-plan.workspace = true
+forkline-services.workspace = true
 http.workspace = true
 http-body.workspace = true
 serde.workspace = true

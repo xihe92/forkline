@@ -16,7 +16,9 @@ mod config;
 mod diagnostic;
 mod graph;
 
-pub use compile::{CompiledNode, CompiledPlan, Edge, KeyInfo, KeyTable, NodeId, compile, compile_all};
+pub use compile::{
+    CompiledNode, CompiledPlan, Edge, KeyInfo, KeyTable, NodeId, compile, compile_all, compile_all_with, compile_with,
+};
 pub use config::{ConfigError, Link, NodeConfig, OnConflict, PlanConfig, PlansFile, parse_link};
 pub use diagnostic::{Diagnostic, Diagnostics};
 pub use graph::{PlanGraph, check_structure};

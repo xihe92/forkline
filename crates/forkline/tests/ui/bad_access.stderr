@@ -1,4 +1,4 @@
-error: expected `in`, `out`, `inout` or `unset` before the key name
+error: expected `in`, `opt`, `out`, `inout` or `unset` before the key name
  --> tests/ui/bad_access.rs:2:21
   |
 2 |     pub struct Io { read name: String }

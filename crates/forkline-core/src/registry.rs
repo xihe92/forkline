@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 use crate::contract::{Interface, KeySpec};
 use crate::error::BuildError;
 use crate::node::erased::{DynBranch, DynDecode, DynEncode, DynJoin, DynModule, DynMultiBranch, DynTerminal};
-use crate::node::{Branch, Build, Decode, Encode, Join, Module, MultiBranch, Terminal};
+use crate::node::{Branch, Build, BuildContext, Decode, Encode, Join, Module, MultiBranch, Terminal};
 
 /// Which node-kind trait a module implements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,7 +108,7 @@ impl fmt::Debug for NodeImpl {
     }
 }
 
-type Factory = Box<dyn Fn(Option<&toml::Value>) -> Result<NodeImpl, BuildError> + Send + Sync>;
+type Factory = Box<dyn Fn(Option<&toml::Value>, &BuildContext<'_>) -> Result<NodeImpl, BuildError> + Send + Sync>;
 
 /// One registered module.
 pub struct RegistryEntry {
@@ -141,8 +141,8 @@ impl RegistryEntry {
     }
 
     /// Build an instance from a node's `config` table (`None` = empty table).
-    pub fn build(&self, config: Option<&toml::Value>) -> Result<NodeImpl, BuildError> {
-        (self.factory)(config)
+    pub fn build(&self, config: Option<&toml::Value>, cx: &BuildContext<'_>) -> Result<NodeImpl, BuildError> {
+        (self.factory)(config, cx)
     }
 }
 
@@ -214,8 +214,8 @@ macro_rules! register_fn {
                 name.into(),
                 NodeKind::$variant,
                 <T::Io<'static> as Interface<'static>>::CONTRACT,
-                Box::new(|config| {
-                    let module = T::build(parse_config::<T::Config>(config)?)?;
+                Box::new(|config, cx| {
+                    let module = T::build_with(parse_config::<T::Config>(config)?, cx)?;
                     Ok(NodeImpl::$variant(Arc::new(module)))
                 }),
             )

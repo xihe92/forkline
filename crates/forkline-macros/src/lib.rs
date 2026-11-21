@@ -14,7 +14,9 @@
 //!
 //! generates `JoinIo<'a>` with
 //!
-//! * `in`: `fn svc_response(&self) -> Option<&String>`
+//! * `in`: `fn svc_response(&self) -> Option<&String>`; validation requires
+//!   the key to be written upstream on every path
+//! * `opt`: the same getter, for keys that may legitimately be absent
 //! * `out`: `fn set_first(&mut self, value: bool)`
 //! * `inout`: getter, setter and `fn total_response_mut(&mut self) -> Option<&mut String>`
 //! * `unset`: `fn unset_scratch(&mut self)`
@@ -37,6 +39,7 @@ use syn::{Attribute, Ident, Path, Token, Type, Visibility, braced};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Access {
     In,
+    Opt,
     Out,
     InOut,
     Unset,
@@ -58,13 +61,14 @@ impl Parse for Field {
         } else {
             let word: Ident = input.parse()?;
             match word.to_string().as_str() {
+                "opt" => Access::Opt,
                 "out" => Access::Out,
                 "inout" => Access::InOut,
                 "unset" => Access::Unset,
                 _ => {
                     return Err(syn::Error::new(
                         word.span(),
-                        "expected `in`, `out`, `inout` or `unset` before the key name",
+                        "expected `in`, `opt`, `out`, `inout` or `unset` before the key name",
                     ));
                 }
             }
@@ -143,6 +147,7 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
         let key_str = key.to_string();
         let access_tok = match access {
             Access::In => quote!(#rt::Access::In),
+            Access::Opt => quote!(#rt::Access::Opt),
             Access::Out => quote!(#rt::Access::Out),
             Access::InOut => quote!(#rt::Access::InOut),
             Access::Unset => quote!(#rt::Access::Unset),
@@ -178,7 +183,7 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
             }
         };
         match access {
-            Access::In => methods.push(getter),
+            Access::In | Access::Opt => methods.push(getter),
             Access::Out => methods.push(setter),
             Access::InOut => {
                 methods.push(getter);

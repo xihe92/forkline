@@ -41,4 +41,14 @@ impl Reply {
         self.headers.insert(name, value);
         self
     }
+
+    /// `Ok(body)` for a success reply, an error of the reply's kind otherwise.
+    pub fn into_result(self) -> Result<Bytes, crate::error::NodeError> {
+        match self.status {
+            Status::Ok => Ok(self.body),
+            Status::Error(kind) => {
+                Err(crate::error::NodeError::new(kind, String::from_utf8_lossy(&self.body).into_owned()))
+            }
+        }
+    }
 }

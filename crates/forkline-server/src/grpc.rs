@@ -12,57 +12,19 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 use forkline_core::node::BoxFuture;
 use forkline_core::{Protocol, RequestEnv, Status as ReplyStatus};
 use forkline_engine::{Engine, EngineError, Request};
 use tokio::time::Instant;
-use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::metadata::MetadataMap;
+
+pub use forkline_services::BytesCodec;
 
 use crate::status::grpc_code;
 
 /// The gRPC service name.
 pub const SERVICE_NAME: &str = "forkline.v1.Plans";
-
-/// A codec that passes message bytes through untouched.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BytesCodec;
-
-impl Codec for BytesCodec {
-    type Encode = Bytes;
-    type Decode = Bytes;
-    type Encoder = BytesCodec;
-    type Decoder = BytesCodec;
-
-    fn encoder(&mut self) -> Self::Encoder {
-        BytesCodec
-    }
-
-    fn decoder(&mut self) -> Self::Decoder {
-        BytesCodec
-    }
-}
-
-impl Encoder for BytesCodec {
-    type Item = Bytes;
-    type Error = tonic::Status;
-
-    fn encode(&mut self, item: Bytes, dst: &mut EncodeBuf<'_>) -> Result<(), tonic::Status> {
-        dst.put(item);
-        Ok(())
-    }
-}
-
-impl Decoder for BytesCodec {
-    type Item = Bytes;
-    type Error = tonic::Status;
-
-    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Bytes>, tonic::Status> {
-        let len = src.remaining();
-        Ok(Some(src.copy_to_bytes(len)))
-    }
-}
 
 /// Parse a `grpc-timeout` header value (`<1-8 digits><H|M|S|m|u|n>`).
 pub fn parse_grpc_timeout(value: &str) -> Option<Duration> {

@@ -13,8 +13,10 @@ use crate::map::{RequestMap, Slot};
 /// How a module uses a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Access {
-    /// Read only.
+    /// Read only; validation requires it to be written upstream.
     In,
+    /// Read only if present; not required upstream.
+    Opt,
     /// Written only.
     Out,
     /// Read and written.
@@ -26,7 +28,7 @@ pub enum Access {
 impl Access {
     /// True when the module may read the key.
     pub fn reads(self) -> bool {
-        matches!(self, Access::In | Access::InOut)
+        matches!(self, Access::In | Access::Opt | Access::InOut)
     }
 
     /// True when the module may change the key.
@@ -39,6 +41,7 @@ impl fmt::Display for Access {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Access::In => "in",
+            Access::Opt => "opt",
             Access::Out => "out",
             Access::InOut => "inout",
             Access::Unset => "unset",

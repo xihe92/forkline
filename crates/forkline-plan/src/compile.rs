@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use forkline_core::{NodeImpl, NodeKind, Registry, Slot};
+use forkline_core::{Access, BuildContext, FixedBitSet, NodeImpl, NodeKind, Registry, ServiceRegistry, Slot};
 
 use crate::config::{OnConflict, PlanConfig, PlansFile};
 use crate::diagnostic::{Diagnostic, Diagnostics};
@@ -149,12 +149,21 @@ impl CompiledPlan {
     }
 }
 
-/// Compile every plan in a file. Fails with every problem from every plan.
+/// Compile every plan in a file with no services. See [`compile_all_with`].
 pub fn compile_all(file: &PlansFile, registry: &Registry) -> Result<BTreeMap<String, Arc<CompiledPlan>>, Diagnostics> {
+    compile_all_with(file, registry, &ServiceRegistry::new())
+}
+
+/// Compile every plan in a file. Fails with every problem from every plan.
+pub fn compile_all_with(
+    file: &PlansFile,
+    registry: &Registry,
+    services: &ServiceRegistry,
+) -> Result<BTreeMap<String, Arc<CompiledPlan>>, Diagnostics> {
     let mut plans = BTreeMap::new();
     let mut diags = Vec::new();
     for (name, plan) in &file.plans {
-        match compile(name, plan, registry) {
+        match compile_with(name, plan, registry, services) {
             Ok(p) => {
                 plans.insert(name.clone(), Arc::new(p));
             }
@@ -164,8 +173,19 @@ pub fn compile_all(file: &PlansFile, registry: &Registry) -> Result<BTreeMap<Str
     if diags.is_empty() { Ok(plans) } else { Err(Diagnostics(diags)) }
 }
 
-/// Validate one plan against the registry and build its modules.
+/// Compile one plan with no services. See [`compile_with`].
 pub fn compile(name: &str, plan: &PlanConfig, registry: &Registry) -> Result<CompiledPlan, Diagnostics> {
+    compile_with(name, plan, registry, &ServiceRegistry::new())
+}
+
+/// Validate one plan against the registry and build its modules, which may
+/// resolve services from `services`.
+pub fn compile_with(
+    name: &str,
+    plan: &PlanConfig,
+    registry: &Registry,
+    services: &ServiceRegistry,
+) -> Result<CompiledPlan, Diagnostics> {
     let (graph, mut diags) = check_structure(name, plan);
 
     // Every module exists.
@@ -235,7 +255,8 @@ pub fn compile(name: &str, plan: &PlanConfig, registry: &Registry) -> Result<Com
     // Build modules from their config.
     let mut imps: Vec<Option<NodeImpl>> = Vec::with_capacity(plan.nodes.len());
     for (node, cfg) in &plan.nodes {
-        let built = registry.get(&cfg.module).and_then(|entry| match entry.build(cfg.config.as_ref()) {
+        let cx = BuildContext::new(name, node, services);
+        let built = registry.get(&cfg.module).and_then(|entry| match entry.build(cfg.config.as_ref(), &cx) {
             Ok(imp) => Some(imp),
             Err(e) => {
                 diags.push(Diagnostic::node(name, node, format!("module `{}`: {e}", cfg.module)));
@@ -243,6 +264,10 @@ pub fn compile(name: &str, plan: &PlanConfig, registry: &Registry) -> Result<Com
             }
         });
         imps.push(built);
+    }
+
+    if let (Some(graph), true) = (&graph, diags.is_empty()) {
+        check_data_flow(name, plan, graph, registry, &bindings, &keys, &mut diags);
     }
 
     let graph = match graph {
@@ -365,5 +390,69 @@ fn check_positions(
         1 => {}
         _ => diags
             .push(Diagnostic::plan(name, format!("the plan has more than one encode node: {}", encoders.join(", ")))),
+    }
+}
+
+/// Every `in` key must be written upstream on every path that reaches the
+/// node. A branch's children each see their own path; a join sees the union
+/// of its incoming paths. `unset` removes a key from what is available. The
+/// terminal is exempt: it can run after a failure anywhere.
+fn check_data_flow(
+    name: &str,
+    plan: &PlanConfig,
+    graph: &PlanGraph,
+    registry: &Registry,
+    bindings: &[Box<[Slot]>],
+    keys: &KeyTable,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let n = graph.names.len();
+    let configs: Vec<_> = plan.nodes.values().collect();
+    let contract = |i: usize| configs.get(i).and_then(|c| registry.get(&c.module)).map(|e| e.contract()).unwrap_or(&[]);
+
+    // Topological order (Kahn); the graph is known to be acyclic here.
+    let mut indegree: Vec<usize> = graph.parents.iter().map(Vec::len).collect();
+    let mut order = Vec::with_capacity(n);
+    let mut ready: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
+    while let Some(i) = ready.pop() {
+        order.push(i);
+        for (c, _) in &graph.children[i] {
+            indegree[*c] -= 1;
+            if indegree[*c] == 0 {
+                ready.push(*c);
+            }
+        }
+    }
+
+    let mut available_out = vec![FixedBitSet::with_capacity(keys.len()); n];
+    for &i in &order {
+        let mut available = FixedBitSet::with_capacity(keys.len());
+        for &p in &graph.parents[i] {
+            available.union_with(&available_out[p]);
+        }
+        let slots = bindings.get(i).map_or(&[][..], |b| &b[..]);
+        if i != graph.terminal {
+            for (spec, &slot) in contract(i).iter().zip(slots) {
+                if spec.access == Access::In && !available.contains(slot as usize) {
+                    let key = keys.info(slot).map_or(spec.name, |k| &*k.name);
+                    diags.push(Diagnostic::node(
+                        name,
+                        &graph.names[i],
+                        format!(
+                            "reads `{key}`, but it is not written upstream on every path \
+                             (declare it `opt` if it may be absent)"
+                        ),
+                    ));
+                }
+            }
+        }
+        for (spec, &slot) in contract(i).iter().zip(slots) {
+            match spec.access {
+                Access::Out | Access::InOut => available.insert(slot as usize),
+                Access::Unset => available.set(slot as usize, false),
+                Access::In | Access::Opt => {}
+            }
+        }
+        available_out[i] = available;
     }
 }

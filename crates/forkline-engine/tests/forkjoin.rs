@@ -25,8 +25,8 @@ interface! {
 interface! {
     #[forkline(crate = forkline_core)]
     pub struct KeysIn {
-        in a: i64, in e: i64, in f: i64, in g: i64,
-        in k: i64, in m: i64, in n: i64, in p: i64,
+        opt a: i64, opt e: i64, opt f: i64, opt g: i64,
+        opt k: i64, opt m: i64, opt n: i64, opt p: i64,
     }
 }
 interface! {

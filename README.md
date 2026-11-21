@@ -12,7 +12,7 @@ rules, and plan reloads that never mix two configurations inside one request.
 
 ## Status
 
-Phases 1 and 2 of 5 are complete:
+Phases 1 to 3 of 5 are complete:
 
 | Area | State |
 | --- | --- |
@@ -25,7 +25,10 @@ Phases 1 and 2 of 5 are complete:
 | Snapshot per request, atomic reload | done (triggers come in phase 4) |
 | HTTP (axum) and gRPC (tonic, raw bytes) adapters | done |
 | JSON or text logs with request spans | done |
-| Service registry, data-flow validation, test kit | phase 3 |
+| Services from `services.toml`: HTTP and gRPC clients, timeout, retry budget, concurrency limit, circuit breaker | done |
+| Data-flow validation (`in` keys written upstream on every path) | done |
+| Subplans (`cx.execute_plan`) | done |
+| Module test kit (`forkline-testkit`) | done |
 | Admin API, admission control, metrics, framed TCP | phase 4 |
 | Fuzzing, load and soak tests | phase 5 |
 
@@ -63,20 +66,26 @@ other paths and runs the terminal node.
 | `forkline-macros` | The `interface!` macro |
 | `forkline-plan` | Plan config, validation, compilation, `forkline-plan check` |
 | `forkline-engine` | Executor and snapshots |
+| `forkline-services` | Service clients and tower layer stacks built from `services.toml` |
 | `forkline-server` | HTTP and gRPC adapters, server config, logging, CLI |
-| `examples/echo` | A runnable echo service |
+| `forkline-testkit` | Run one module in a test with typed inputs and mock services |
+| `examples/echo` | The smallest plan: decode, echo, encode |
+| `examples/horoscope` | A fork, a branch and a join over three HTTP backends |
 
 ## Quick start
 
 ```sh
-cargo run --release -p forkline-echo -- serve \
-  --config examples/echo/server.toml --plans examples/echo/plans.toml
+# A fake backend, then the example server.
+cargo run --release -p forkline-horoscope --bin horoscope-backend &
+cargo run --release -p forkline-horoscope -- serve --config examples/horoscope/server.toml \
+  --plans examples/horoscope/plans.toml --services examples/horoscope/services.toml
 
-curl -d 'hello' http://127.0.0.1:8080/echo      # echo: hello
-curl -X POST http://127.0.0.1:8080/echo         # 400 empty body
+curl -d '{"want":"horoscope","sign":"leo"}' http://127.0.0.1:8080/query
+# {"want":"horoscope","time":"...","result":"leo: a good day to ship","summary":"..."}
+curl -d '{"want":"stock","ticker":"ACME"}' http://127.0.0.1:8080/query
 ```
 
-gRPC: `/forkline.v1.Plans/Echo` on port 50051 takes and returns raw message
+gRPC: `/forkline.v1.Plans/Query` on port 50051 takes and returns raw message
 bytes, so any client that can send bytes works without generated code.
 
 ## Writing a module
@@ -124,6 +133,10 @@ Node kinds: `Decode` (root), `Module` (async step), `Branch`, `MultiBranch`,
 `Join`, `Encode` (builds the reply) and `Terminal` (builds the reply when the
 plan fails). Any non-branch node with two or more children is a fork.
 
+Contract keys are `in` (read; must be written upstream on every path),
+`opt` (read if present), `out` (written), `inout` (both) or `unset`
+(removed). Plans may rename a module's keys per node.
+
 ## Plans
 
 ```toml
@@ -144,9 +157,53 @@ Every problem in a plan is reported at once, and a plan with any problem is
 rejected whole:
 
 ```sh
+forkline-horoscope check --plans plans.toml --services services.toml   # every check
 forkline-echo check --plans plans.toml   # full check with this binary's modules
 forkline-plan check plans.toml           # graph rules only, no modules needed
 ```
+
+## Services
+
+Modules reach backends only through named services. Each one is built from
+`services.toml` and wrapped in tower layers:
+
+```toml
+[services.horoscope]
+kind = "http"                         # or "grpc", or a kind registered in code
+url = "http://horoscope.internal:8080/"
+timeout_ms = 40                       # per attempt; the request deadline also applies
+retries = 1                           # within a retry budget (20% of requests by default)
+concurrency_limit = 256
+load_shed = true                      # at the limit, fail at once instead of queueing
+breaker = { failures = 20, open_ms = 1000 }
+```
+
+A module resolves its clients while it is built, so a missing or mistyped
+service rejects the plan at load time rather than on the first request:
+
+```rust
+impl Build for HoroscopeLookup {
+    type Config = LookupConfig;
+    fn build_with(config: LookupConfig, cx: &BuildContext<'_>) -> Result<Self, BuildError> {
+        Ok(Self { client: cx.service::<HttpClient>(&config.service)? })
+    }
+}
+```
+
+HTTPS needs the `tls` feature of `forkline-services`.
+
+## Testing modules
+
+```rust
+let services = ServiceRegistry::new().with("horoscope", HttpClient::from_service("horoscope", mock));
+let out = Harness::<HoroscopeLookup>::from_config("service = \"horoscope\"", services)?
+    .inputs(inputs! { sign: String::from("leo") })
+    .run_module()
+    .await?;
+assert_eq!(out.get::<String>("svc_response").map(String::as_str), Some("bold"));
+```
+
+Joins run over a fork base and a list of paths, with the engine's merge rules.
 
 ## Benchmarks
 
