@@ -16,6 +16,8 @@ pub struct ExecPlan {
     pub(crate) owner: Vec<Option<NodeId>>,
     /// The encode node.
     pub(crate) encode: Option<NodeId>,
+    /// Metric handles.
+    pub(crate) metrics: std::sync::Arc<crate::metrics_handles::PlanMetrics>,
 }
 
 impl ExecPlan {
@@ -57,7 +59,9 @@ impl ExecPlan {
         }
 
         let encode = compiled.nodes.iter().position(|node| node.kind() == NodeKind::Encode);
-        Self { compiled, reach, owner, encode }
+        let names: Vec<&str> = compiled.nodes.iter().map(|n| &*n.name).collect();
+        let metrics = std::sync::Arc::new(crate::metrics_handles::PlanMetrics::new(&compiled.name, &names));
+        Self { compiled, reach, owner, encode, metrics }
     }
 
     /// True when `to` is reachable from `from`.

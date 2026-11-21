@@ -91,6 +91,7 @@ async fn segment(
         }
         let span = tracing::info_span!("node", node = %node.name, module = %node.module, kind = node.kind().as_str());
         let slots = &node.slots;
+        let started = std::time::Instant::now();
         let step: Result<Step, NodeError> = match &node.imp {
             NodeImpl::Decode(m) => guarded(&span, || m.dyn_decode(&cx, body, &mut map, slots)).map(|()| Step::Next),
             NodeImpl::Module(m) => {
@@ -113,8 +114,10 @@ async fn segment(
                 return fail(ErrorKind::Internal, "join and terminal nodes are not run inside a path", map);
             }
         };
+        plan.metrics.node(id, started.elapsed());
         let next = match step {
             Err(e) => {
+                count_error(&plan, &node.name, e.kind());
                 return SegEnd::Failed { node: id, error: PlanError::from_node(node.name.clone(), &e), map };
             }
             Ok(Step::Reply(reply)) => return SegEnd::Reply(reply),
@@ -150,6 +153,16 @@ async fn segment(
         }
         id = next;
     }
+}
+
+fn count_error(plan: &ExecPlan, node: &str, kind: ErrorKind) {
+    metrics::counter!(
+        "forkline_node_errors_total",
+        "plan" => plan.compiled.name.to_string(),
+        "node" => node.to_owned(),
+        "kind" => kind.as_str(),
+    )
+    .increment(1);
 }
 
 /// The map at a divergence point, which joins it owns merge against.
@@ -363,6 +376,15 @@ impl Run {
             let keys: Vec<&str> =
                 conflicts.iter().map(|&s| plan.compiled.keys.info(s).map_or("?", |k| &*k.name)).collect();
             tracing::warn!(join = %name, keys = ?keys, policy = ?on_conflict, "merge conflict");
+            for key in &keys {
+                metrics::counter!(
+                    "forkline_merge_conflicts_total",
+                    "plan" => plan.compiled.name.to_string(),
+                    "node" => name.to_string(),
+                    "key" => (*key).to_owned(),
+                )
+                .increment(1);
+            }
             if on_conflict == OnConflict::Error {
                 let message = format!("keys changed on more than one path: {}", keys.join(", "));
                 return self.fail_at(join, ErrorKind::MergeConflict, message, merged);

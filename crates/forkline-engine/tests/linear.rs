@@ -250,3 +250,52 @@ async fn reload_swaps_plans_and_in_flight_requests_keep_their_snapshot() {
     assert!(e.reload(&broken).is_err());
     assert_eq!(e.snapshot().version, 2);
 }
+
+#[tokio::test]
+async fn rollback_returns_to_the_previous_snapshot() {
+    let e = Engine::builder(registry())
+        .history(2)
+        .build(forkline_engine::LoadInput {
+            plans: &plans(r#"{ suffix = "-v1" }"#, "{}", "{}", 100),
+            services: Arc::default(),
+            config_hash: 0xabc,
+        })
+        .unwrap();
+    assert_eq!(e.snapshot().config_hash, 0xabc);
+    for v in 2..=4 {
+        let version = e.reload(&plans(&format!(r#"{{ suffix = "-v{v}" }}"#), "{}", "{}", 100)).unwrap();
+        assert_eq!(version, v);
+    }
+    assert_eq!(e.history(), vec![2, 3], "only the last two are kept");
+    assert_eq!(e.call("p", Request::in_process("x")).await.unwrap().body, Bytes::from("x-v4"));
+
+    assert_eq!(e.rollback(), Some(3));
+    assert_eq!(e.call("p", Request::in_process("x")).await.unwrap().body, Bytes::from("x-v3"));
+    assert_eq!(e.rollback(), Some(2));
+    assert_eq!(e.rollback(), None, "history exhausted");
+    assert_eq!(e.snapshot().version, 2);
+
+    // A reload after a rollback gets a fresh version number.
+    assert_eq!(e.reload(&plans("{}", "{}", "{}", 100)).unwrap(), 5);
+    assert_eq!(e.snapshot().config_hash, 0xabc, "reload keeps the hash it was given last");
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_or_long_queued_requests_are_shed_before_any_module_runs() {
+    let e = engine(r#"{ fail = true }"#, "{}");
+
+    let mut late = Request::in_process("x");
+    late.env.inbound_deadline = Some(late.env.received_at);
+    let err = e.call("p", late).await.unwrap_err();
+    assert!(matches!(err, EngineError::Shed { reason: "deadline passed before start", .. }), "{err}");
+
+    e.set_max_queue(Some(Duration::from_millis(10)));
+    let queued = Request::in_process("x");
+    tokio::time::advance(Duration::from_millis(20)).await;
+    let err = e.call("p", queued).await.unwrap_err();
+    assert!(matches!(err, EngineError::Shed { reason: "waited too long to start", .. }), "{err}");
+
+    // A fresh request runs (and fails in its module, proving it ran).
+    let reply = e.call("p", Request::in_process("x")).await.unwrap();
+    assert_eq!(reply.status, Status::Error(ErrorKind::Module));
+}

@@ -16,6 +16,7 @@ use tower::{Service, ServiceExt};
 
 use crate::error::{ServiceError, ServiceErrorKind};
 use crate::stack::{StackConfig, layered};
+use crate::trace::CallTimings;
 
 /// A codec that passes message bytes through untouched.
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,6 +64,8 @@ pub struct GrpcRequest {
     pub path: String,
     /// Encoded request message.
     pub body: Bytes,
+    /// Request metadata.
+    pub metadata: http::HeaderMap,
 }
 
 /// Settings for `kind = "grpc"`.
@@ -119,10 +122,9 @@ impl Service<GrpcRequest> for TonicTransport {
                 .map_err(|e| ServiceError::new(ServiceErrorKind::Other, format!("bad method path: {e}")))?;
             let mut grpc = tonic::client::Grpc::new(channel);
             grpc.ready().await.map_err(|e| ServiceError::new(ServiceErrorKind::Transport, e.to_string()))?;
-            grpc.unary(tonic::Request::new(req.body), path, BytesCodec)
-                .await
-                .map(tonic::Response::into_inner)
-                .map_err(|s| from_status(&s))
+            let mut request = tonic::Request::new(req.body);
+            *request.metadata_mut() = tonic::metadata::MetadataMap::from_headers(req.metadata);
+            grpc.unary(request, path, BytesCodec).await.map(tonic::Response::into_inner).map_err(|s| from_status(&s))
         })
     }
 }
@@ -136,6 +138,7 @@ fn retryable(result: &Result<Bytes, ServiceError>) -> bool {
 pub struct GrpcClient {
     name: Arc<str>,
     svc: BoxCloneSyncService<GrpcRequest, Bytes, ServiceError>,
+    timings: CallTimings,
 }
 
 impl GrpcClient {
@@ -145,12 +148,16 @@ impl GrpcClient {
         S: Service<GrpcRequest, Response = Bytes, Error = ServiceError> + Clone + Send + Sync + 'static,
         S::Future: Send + 'static,
     {
-        Self { name: Arc::from(name), svc: BoxCloneSyncService::new(svc) }
+        Self { name: Arc::from(name), svc: BoxCloneSyncService::new(svc), timings: CallTimings::new(name) }
     }
 
     /// A tonic-backed client from settings.
     pub fn from_settings(name: &str, settings: &GrpcSettings, stack: &StackConfig) -> Result<Self, String> {
-        Ok(Self { name: Arc::from(name), svc: layered(TonicTransport::new(settings)?, stack, retryable) })
+        Ok(Self {
+            name: Arc::from(name),
+            svc: layered(TonicTransport::new(settings)?, stack, retryable),
+            timings: CallTimings::new(name),
+        })
     }
 
     /// The service name.
@@ -158,15 +165,20 @@ impl GrpcClient {
         &self.name
     }
 
-    /// Call `path` with `body`, bounded by the request's deadline and cancellation.
+    /// Call `path` with `body`, bounded by the request's deadline and
+    /// cancellation. The inbound `traceparent` and `tracestate` are forwarded.
     pub async fn call(&self, cx: &Ctx, path: impl Into<String>, body: impl Into<Bytes>) -> Result<Bytes, ServiceError> {
-        let req = GrpcRequest { path: path.into(), body: body.into() };
+        let mut metadata = http::HeaderMap::new();
+        crate::trace::forward(cx, &mut metadata);
+        let req = GrpcRequest { path: path.into(), body: body.into(), metadata };
+        let started = std::time::Instant::now();
         let call = tokio::time::timeout_at(cx.deadline(), self.svc.clone().oneshot(req));
         let result = tokio::select! {
             biased;
             () = cx.cancellation().cancelled() => Err(ServiceError::new(ServiceErrorKind::Cancelled, "request cancelled")),
             r = call => r.unwrap_or_else(|_| Err(ServiceError::new(ServiceErrorKind::Deadline, "request deadline passed"))),
         };
+        self.timings.record(result.is_ok(), started.elapsed());
         result.map_err(|e| e.with_service(&self.name))
     }
 }

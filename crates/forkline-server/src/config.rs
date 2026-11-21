@@ -16,8 +16,25 @@
 //! log_format = "json"             # or "text"
 //! filter = "info"                 # RUST_LOG overrides it
 //!
+//! [[tcp]]
+//! addr = "0.0.0.0:7000"
+//! plan = "echo"                   # length-delimited frames, one request each
+//!
+//! [admin]
+//! addr = "127.0.0.1:6789"         # /healthz /readyz /metrics /admin/{snapshot,reload,rollback}
+//! allow = ["127.0.0.1/32", "::1/128"]
+//!
+//! [admission]
+//! red = 800                       # refuse new requests at 800 in flight...
+//! green = 500                     # ...until back down to 500
+//! max_queue_ms = 50               # shed requests that waited longer to start
+//!
+//! [reload]
+//! history = 5                     # snapshots kept for rollback
+//! watch_interval_ms = 0           # >0: poll config files and reload on change
+//!
 //! [shutdown]
-//! drain_timeout_ms = 10000        # wait for detached paths after listeners stop
+//! drain_timeout_ms = 10000        # in-flight requests, then detached paths
 //! ```
 
 use std::collections::BTreeMap;
@@ -46,13 +63,102 @@ pub struct ServerConfig {
     /// Shutdown behaviour.
     #[serde(default)]
     pub shutdown: ShutdownConfig,
+    /// Length-delimited TCP listeners.
+    #[serde(default)]
+    pub tcp: Vec<TcpListenerConfig>,
+    /// Admin listener (health, metrics, reload, rollback).
+    pub admin: Option<AdminConfig>,
+    /// Admission control shared by all listeners.
+    pub admission: Option<AdmissionConfig>,
+    /// Reload behaviour.
+    #[serde(default)]
+    pub reload: ReloadConfig,
+}
+
+/// One length-delimited TCP listener: every frame is a request to `plan`.
+///
+/// Frames carry a 4-byte big-endian length prefix. A response frame is one
+/// status byte followed by the reply body: 0 ok, 1 bad request, 2 failed,
+/// 3 deadline, 4 overloaded (refused or shed).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpListenerConfig {
+    /// Address to bind.
+    pub addr: SocketAddr,
+    /// Plan every frame runs.
+    pub plan: String,
+    /// Largest accepted frame; a larger one closes the connection.
+    #[serde(default = "default_max_frame")]
+    pub max_frame_bytes: usize,
+    /// Requests one connection may have in flight (responses keep request order).
+    #[serde(default = "default_pipeline")]
+    pub max_in_flight_per_connection: usize,
+}
+
+fn default_max_frame() -> usize {
+    1 << 20
+}
+
+fn default_pipeline() -> usize {
+    32
+}
+
+/// The admin listener.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    /// Address to bind; keep it off the public interface.
+    pub addr: SocketAddr,
+    /// Networks allowed to call it (default: loopback only).
+    #[serde(default = "default_allow")]
+    pub allow: Vec<String>,
+}
+
+fn default_allow() -> Vec<String> {
+    vec!["127.0.0.1/32".into(), "::1/128".into()]
+}
+
+/// Admission control: refuse new work above `red` in-flight requests until
+/// the count falls to `green`.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionConfig {
+    /// In-flight requests at which new requests are refused.
+    pub red: usize,
+    /// In-flight requests at which admission resumes.
+    pub green: usize,
+    /// Shed requests that waited longer than this before starting, in milliseconds.
+    pub max_queue_ms: Option<u64>,
+}
+
+/// Reload behaviour.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadConfig {
+    /// Previous snapshots kept for rollback.
+    #[serde(default = "default_history")]
+    pub history: usize,
+    /// Poll the plans and services files this often and reload on change (0: off).
+    #[serde(default)]
+    pub watch_interval_ms: u64,
+}
+
+fn default_history() -> usize {
+    5
+}
+
+impl Default for ReloadConfig {
+    fn default() -> Self {
+        Self { history: default_history(), watch_interval_ms: 0 }
+    }
 }
 
 /// Shutdown behaviour.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShutdownConfig {
-    /// How long to wait for detached paths after the listeners stop.
+    /// How long to wait for in-flight requests and then detached paths after
+    /// shutdown starts; whatever is left is cancelled.
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
 }
@@ -146,8 +252,26 @@ impl ServerConfig {
     /// Check that every route and method names a loaded plan.
     pub fn validate(&self, engine: &Engine) -> Result<(), String> {
         let mut problems = Vec::new();
-        if self.http.is_empty() && self.grpc.is_empty() {
+        if self.http.is_empty() && self.grpc.is_empty() && self.tcp.is_empty() {
             problems.push("no listeners configured".to_owned());
+        }
+        for l in &self.tcp {
+            if !engine.has_plan(&l.plan) {
+                problems.push(format!("tcp {}: unknown plan `{}`", l.addr, l.plan));
+            }
+            if l.max_frame_bytes == 0 || l.max_in_flight_per_connection == 0 {
+                problems.push(format!("tcp {}: max_frame_bytes and max_in_flight_per_connection must be > 0", l.addr));
+            }
+        }
+        if let Some(a) = self.admission.as_ref().filter(|a| a.red == 0 || a.green >= a.red) {
+            problems.push(format!("admission: need 0 < green < red (green = {}, red = {})", a.green, a.red));
+        }
+        if let Some(admin) = &self.admin {
+            for net in &admin.allow {
+                if net.parse::<ipnet::IpNet>().is_err() && net.parse::<std::net::IpAddr>().is_err() {
+                    problems.push(format!("admin: `{net}` is not an IP address or network"));
+                }
+            }
         }
         for l in &self.http {
             for (path, plan) in &l.routes {

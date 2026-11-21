@@ -21,6 +21,7 @@ use tonic::metadata::MetadataMap;
 
 pub use forkline_services::BytesCodec;
 
+use crate::admission::Gate;
 use crate::status::grpc_code;
 
 /// The gRPC service name.
@@ -52,13 +53,18 @@ pub fn parse_grpc_timeout(value: &str) -> Option<Duration> {
 pub struct GrpcPlans {
     engine: Arc<Engine>,
     methods: Arc<HashMap<String, Arc<str>>>,
+    gate: Gate,
 }
 
 impl GrpcPlans {
-    /// Map `/forkline.v1.Plans/<method>` to plans.
+    /// Map `/forkline.v1.Plans/<method>` to plans, without admission control.
     pub fn new(engine: Arc<Engine>, methods: &BTreeMap<String, String>) -> Self {
+        Self::gated(engine, methods, Gate::new(None, "grpc".into(), tokio_util::sync::CancellationToken::new()))
+    }
+
+    pub(crate) fn gated(engine: Arc<Engine>, methods: &BTreeMap<String, String>, gate: Gate) -> Self {
         let methods = methods.iter().map(|(m, p)| (format!("/{SERVICE_NAME}/{m}"), Arc::from(p.as_str()))).collect();
-        Self { engine, methods: Arc::new(methods) }
+        Self { engine, methods: Arc::new(methods), gate }
     }
 }
 
@@ -91,10 +97,19 @@ where
             let status = tonic::Status::unimplemented(format!("no plan is mapped to {path}"));
             return Box::pin(async move { Ok(status.into_http()) });
         };
+        let Some(pass) = self.gate.enter() else {
+            let status = tonic::Status::resource_exhausted("overloaded");
+            return Box::pin(async move { Ok(status.into_http()) });
+        };
         let unary = PlanUnary { engine: self.engine.clone(), plan, route: Arc::from(path) };
+        let gate = self.gate.clone();
         Box::pin(async move {
+            let _pass = pass;
             let mut grpc = tonic::server::Grpc::new(BytesCodec);
-            Ok(grpc.unary(unary, req).await)
+            match gate.guard(grpc.unary(unary, req)).await {
+                Some(response) => Ok(response),
+                None => Ok(tonic::Status::unavailable("shutting down").into_http()),
+            }
         })
     }
 }
@@ -138,6 +153,7 @@ impl tonic::server::UnaryService<Bytes> for PlanUnary {
                         MetadataMap::from_headers(reply.headers),
                     )),
                 },
+                Err(EngineError::Shed { .. }) => Err(tonic::Status::resource_exhausted("shed")),
                 Err(EngineError::UnknownPlan(plan)) => {
                     tracing::error!(%plan, "method names a plan that is no longer loaded");
                     Err(tonic::Status::unimplemented("plan not loaded"))

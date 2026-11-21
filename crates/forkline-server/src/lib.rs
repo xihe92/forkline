@@ -13,23 +13,45 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "mimalloc", feature = "jemalloc"))]
+compile_error!("enable at most one of the `mimalloc` and `jemalloc` features");
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+pub mod admin;
+pub mod admission;
 pub mod cli;
 pub mod config;
 pub mod grpc;
 pub mod http;
 mod status;
+pub mod tcp;
 pub mod telemetry;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use forkline_engine::Engine;
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 
+pub use admin::Reloader;
 pub use config::ServerConfig;
+
+use crate::admission::{Admission, Gate};
+use crate::config::TcpListenerConfig;
 
 /// The server could not start or stopped with an error.
 #[derive(Debug, thiserror::Error)]
@@ -48,7 +70,7 @@ pub enum ServerError {
     /// A listener failed while serving.
     #[error("{listener} listener failed: {message}")]
     Serve {
-        /// `http` or `grpc`.
+        /// `http`, `grpc`, `tcp` or `admin`.
         listener: &'static str,
         /// What went wrong.
         message: String,
@@ -62,6 +84,28 @@ pub enum Bound {
     Http(SocketAddr),
     /// gRPC listener and its local address.
     Grpc(SocketAddr),
+    /// Length-delimited TCP listener and its local address.
+    Tcp(SocketAddr),
+    /// Admin listener and its local address.
+    Admin(SocketAddr),
+}
+
+/// Optional pieces a server binary supplies.
+#[derive(Clone, Default)]
+pub struct Hooks {
+    /// Called by `POST /admin/reload` (and the CLI's SIGHUP and file watcher).
+    pub reloader: Option<Reloader>,
+    /// Rendered at `GET /metrics`.
+    pub metrics: Option<PrometheusHandle>,
+}
+
+impl std::fmt::Debug for Hooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hooks")
+            .field("reloader", &self.reloader.is_some())
+            .field("metrics", &self.metrics.is_some())
+            .finish()
+    }
 }
 
 /// All listeners bound; call [`BoundServer::run`] to serve.
@@ -69,47 +113,98 @@ pub enum Bound {
 pub struct BoundServer {
     http: Vec<(TcpListener, axum::Router)>,
     grpc: Vec<(TcpListener, grpc::GrpcPlans)>,
+    tcp: Vec<(TcpListener, TcpListenerConfig, Gate)>,
+    admin: Option<(TcpListener, axum::Router)>,
     bound: Vec<Bound>,
     engine: Arc<Engine>,
-    drain_timeout: std::time::Duration,
+    admission: Option<Arc<Admission>>,
+    ready: Arc<AtomicBool>,
+    hard_stop: CancellationToken,
+    drain_timeout: Duration,
 }
 
 impl BoundServer {
     /// Check the config against the engine's plans and bind every listener.
     pub async fn bind(config: &ServerConfig, engine: Arc<Engine>) -> Result<Self, ServerError> {
+        Self::bind_with(config, engine, Hooks::default()).await
+    }
+
+    /// Like [`bind`](Self::bind), with a reloader and a metrics handle for the admin listener.
+    pub async fn bind_with(config: &ServerConfig, engine: Arc<Engine>, hooks: Hooks) -> Result<Self, ServerError> {
         config.validate(&engine).map_err(ServerError::Config)?;
+        let admission = config.admission.as_ref().map(|a| Arc::new(Admission::new(a)));
+        if let Some(a) = &config.admission {
+            engine.set_max_queue(a.max_queue_ms.map(Duration::from_millis));
+        }
+        let ready = Arc::new(AtomicBool::new(true));
+        let hard_stop = CancellationToken::new();
         let mut server = BoundServer {
             http: Vec::new(),
             grpc: Vec::new(),
+            tcp: Vec::new(),
+            admin: None,
             bound: Vec::new(),
             engine: engine.clone(),
-            drain_timeout: std::time::Duration::from_millis(config.shutdown.drain_timeout_ms),
+            admission: admission.clone(),
+            ready: ready.clone(),
+            hard_stop: hard_stop.clone(),
+            drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
         };
         for listener in &config.http {
             let tcp = bind(listener.addr).await?;
-            server.bound.push(Bound::Http(local_addr(&tcp, listener.addr)?));
-            server.http.push((tcp, http::router(engine.clone(), &listener.routes)));
+            let addr = local_addr(&tcp, listener.addr)?;
+            server.bound.push(Bound::Http(addr));
+            let gate = Gate::new(admission.clone(), format!("http:{addr}"), hard_stop.clone());
+            server.http.push((tcp, http::gated_router(engine.clone(), &listener.routes, gate)));
         }
         for listener in &config.grpc {
             let tcp = bind(listener.addr).await?;
-            server.bound.push(Bound::Grpc(local_addr(&tcp, listener.addr)?));
-            server.grpc.push((tcp, grpc::GrpcPlans::new(engine.clone(), &listener.methods)));
+            let addr = local_addr(&tcp, listener.addr)?;
+            server.bound.push(Bound::Grpc(addr));
+            let gate = Gate::new(admission.clone(), format!("grpc:{addr}"), hard_stop.clone());
+            server.grpc.push((tcp, grpc::GrpcPlans::gated(engine.clone(), &listener.methods, gate)));
+        }
+        for listener in &config.tcp {
+            let tcp = bind(listener.addr).await?;
+            let addr = local_addr(&tcp, listener.addr)?;
+            server.bound.push(Bound::Tcp(addr));
+            let gate = Gate::new(admission.clone(), format!("tcp:{addr}"), hard_stop.clone());
+            server.tcp.push((tcp, listener.clone(), gate));
+        }
+        if let Some(admin) = &config.admin {
+            let tcp = bind(admin.addr).await?;
+            server.bound.push(Bound::Admin(local_addr(&tcp, admin.addr)?));
+            let state = admin::AdminState {
+                engine,
+                reloader: hooks.reloader,
+                metrics: hooks.metrics,
+                ready,
+                allow: Arc::new(admin::parse_allow(&admin.allow)),
+            };
+            server.admin = Some((tcp, admin::router(state)));
         }
         Ok(server)
     }
 
-    /// The bound listeners, in config order (HTTP first, then gRPC).
+    /// The bound listeners, in config order (HTTP, gRPC, TCP, then admin).
     pub fn bound(&self) -> &[Bound] {
         &self.bound
     }
 
-    /// Serve until `shutdown` is cancelled, then stop accepting, let in-flight
-    /// requests finish, and wait up to the drain timeout for detached paths.
+    /// The admission controller, if configured.
+    pub fn admission(&self) -> Option<&Arc<Admission>> {
+        self.admission.as_ref()
+    }
+
+    /// Serve until `shutdown` is cancelled. Then: readiness turns false,
+    /// listeners stop accepting, in-flight requests get up to the drain
+    /// timeout to finish (the rest are cancelled), detached paths get what is
+    /// left of it, and the admin listener stops last.
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), ServerError> {
-        let mut tasks: JoinSet<Result<(), ServerError>> = JoinSet::new();
+        let mut listeners: JoinSet<Result<(), ServerError>> = JoinSet::new();
         for (tcp, router) in self.http {
             let stop = shutdown.clone();
-            tasks.spawn(async move {
+            listeners.spawn(async move {
                 axum::serve(tcp, router.into_make_service_with_connect_info::<SocketAddr>())
                     .with_graceful_shutdown(stop.cancelled_owned())
                     .await
@@ -118,7 +213,7 @@ impl BoundServer {
         }
         for (tcp, plans) in self.grpc {
             let stop = shutdown.clone();
-            tasks.spawn(async move {
+            listeners.spawn(async move {
                 tonic::transport::Server::builder()
                     .add_service(plans)
                     .serve_with_incoming_shutdown(TcpListenerStream::new(tcp), stop.cancelled_owned())
@@ -126,26 +221,74 @@ impl BoundServer {
                     .map_err(|e| ServerError::Serve { listener: "grpc", message: e.to_string() })
             });
         }
+        for (tcp, config, gate) in self.tcp {
+            let (engine, stop) = (self.engine.clone(), shutdown.clone());
+            listeners.spawn(async move {
+                tcp::serve(tcp, engine, gate, config, stop)
+                    .await
+                    .map_err(|e| ServerError::Serve { listener: "tcp", message: e.to_string() })
+            });
+        }
+        let admin_stop = CancellationToken::new();
+        let admin_task = self.admin.map(|(tcp, router)| {
+            let stop = admin_stop.clone();
+            tokio::spawn(async move {
+                axum::serve(tcp, router.into_make_service_with_connect_info::<SocketAddr>())
+                    .with_graceful_shutdown(stop.cancelled_owned())
+                    .await
+                    .map_err(|e| ServerError::Serve { listener: "admin", message: e.to_string() })
+            })
+        });
+
+        // Serve until asked to stop, or until a listener fails.
         let mut result = Ok(());
-        while let Some(joined) = tasks.join_next().await {
-            let outcome =
-                joined.unwrap_or_else(|e| Err(ServerError::Serve { listener: "task", message: e.to_string() }));
-            if let Err(e) = outcome {
-                tracing::error!(error = %e, "listener stopped");
-                shutdown.cancel();
-                if result.is_ok() {
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            Some(joined) = listeners.join_next() => {
+                let outcome = joined.unwrap_or_else(|e| Err(ServerError::Serve { listener: "task", message: e.to_string() }));
+                if let Err(e) = outcome {
+                    tracing::error!(error = %e, "listener stopped");
                     result = Err(e);
                 }
+                shutdown.cancel();
             }
         }
-        // Listeners have stopped and in-flight requests have answered; let
-        // detached paths finish (they stop at their own deadlines anyway).
+
+        // Drain.
+        self.ready.store(false, Ordering::Release);
+        let started = Instant::now();
+        let drained = tokio::time::timeout(self.drain_timeout, async {
+            while let Some(joined) = listeners.join_next().await {
+                if let Ok(Err(e)) = joined {
+                    tracing::error!(error = %e, "listener stopped with an error while draining");
+                }
+            }
+        })
+        .await;
+        if drained.is_err() {
+            // Cut off the requests still running (they answer "shutting down"),
+            // give the listeners a moment to close their connections, then abort.
+            tracing::warn!("drain timeout; cancelling the requests still running");
+            self.hard_stop.cancel();
+            let closed =
+                tokio::time::timeout(Duration::from_secs(1), async { while listeners.join_next().await.is_some() {} })
+                    .await;
+            if closed.is_err() {
+                listeners.abort_all();
+                while listeners.join_next().await.is_some() {}
+            }
+        }
+        let left = self.drain_timeout.saturating_sub(started.elapsed());
         let pending = self.engine.detached_running();
         if pending > 0 {
             tracing::info!(requests = pending, "waiting for detached paths");
-            if tokio::time::timeout(self.drain_timeout, self.engine.wait_detached()).await.is_err() {
+            if tokio::time::timeout(left, self.engine.wait_detached()).await.is_err() {
                 tracing::warn!(requests = self.engine.detached_running(), "drain timeout; detached paths abandoned");
             }
+        }
+        admin_stop.cancel();
+        if let Some(task) = admin_task {
+            let _ = task.await;
         }
         result
     }

@@ -29,6 +29,11 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+ipnet = "2"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+mimalloc = "0.1"
+tikv-jemallocator = "0.7"
 petgraph = { version = "0.8", default-features = false, features = ["std"] }
 proc-macro2 = "1"
 proptest = "1"

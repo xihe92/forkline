@@ -39,6 +39,7 @@ async fn start() -> Running {
         match *b {
             Bound::Http(a) => http = Some(a),
             Bound::Grpc(a) => grpc = Some(a),
+            Bound::Tcp(_) | Bound::Admin(_) => {}
         }
     }
     let shutdown = CancellationToken::new();

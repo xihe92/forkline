@@ -29,6 +29,7 @@ pub mod grpc;
 pub mod http;
 mod limit;
 mod stack;
+mod trace;
 
 pub use breaker::BreakerConfig;
 pub use config::{ServiceConfig, ServiceKinds, ServicesFile};

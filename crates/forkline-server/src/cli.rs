@@ -19,12 +19,12 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use forkline_core::{Registry, ServiceRegistry};
-use forkline_engine::Engine;
+use forkline_engine::{Engine, LoadInput};
 use forkline_plan::PlansFile;
 use forkline_services::{ServiceKinds, ServicesFile};
 use tokio_util::sync::CancellationToken;
 
-use crate::{Bound, BoundServer, ServerConfig, cancel_on_signal, telemetry};
+use crate::{Bound, BoundServer, Hooks, Reloader, ServerConfig, cancel_on_signal, telemetry};
 
 #[derive(Parser)]
 #[command(version, about = "A Forkline plan server")]
@@ -106,11 +106,29 @@ impl App {
         Ok(registry)
     }
 
+    /// Hash of the config files, for spans and the admin API.
+    pub fn config_hash(plans: &Path, services: Option<&Path>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for path in std::iter::once(plans).chain(services) {
+            std::fs::read(path).unwrap_or_default().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Re-read the plans and services files and swap a new snapshot into `engine`.
+    pub fn reload(&self, engine: &Engine, plans: &Path, services: Option<&Path>) -> Result<u64, String> {
+        let file = PlansFile::load(plans).map_err(|e| e.to_string())?;
+        let registry = self.load_services(services)?;
+        let config_hash = Self::config_hash(plans, services);
+        engine.load(LoadInput { plans: &file, services: Arc::new(registry), config_hash }).map_err(|d| d.to_string())
+    }
+
     /// Parse the command line and run it.
     pub fn run(self) -> ExitCode {
         match Cli::parse().command {
             Command::Check { plans, services } => self.check(&plans, services.as_deref()),
-            Command::Serve { config, plans, services } => self.serve(&config, &plans, services.as_deref()),
+            Command::Serve { config, plans, services } => Arc::new(self).serve(&config, &plans, services),
         }
     }
 
@@ -143,7 +161,7 @@ impl App {
         }
     }
 
-    fn serve(&self, config: &Path, plans: &Path, services: Option<&Path>) -> ExitCode {
+    fn serve(self: Arc<Self>, config: &Path, plans: &Path, services: Option<PathBuf>) -> ExitCode {
         let config = match ServerConfig::load(config) {
             Ok(c) => c,
             Err(e) => {
@@ -166,9 +184,18 @@ impl App {
                 return ExitCode::FAILURE;
             }
         };
+        let plans = plans.to_path_buf();
         runtime.block_on(async move {
             telemetry::init(&config.telemetry);
-            let engine = match self.load_engine(plans, services) {
+            // The recorder must exist before the engine so plan metric handles bind to it.
+            let metrics = match telemetry::install_metrics() {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    tracing::warn!(error = %e, "metrics disabled");
+                    None
+                }
+            };
+            let engine = match self.build_engine(&config, &plans, services.as_deref()) {
                 Ok(e) => Arc::new(e),
                 Err(e) => {
                     for line in e.lines() {
@@ -177,7 +204,12 @@ impl App {
                     return ExitCode::FAILURE;
                 }
             };
-            let server = match BoundServer::bind(&config, engine).await {
+            let reloader: Reloader = {
+                let (app, engine, plans, services) = (self.clone(), engine.clone(), plans.clone(), services.clone());
+                Arc::new(move || app.reload(&engine, &plans, services.as_deref()))
+            };
+            let hooks = Hooks { reloader: Some(reloader.clone()), metrics };
+            let server = match BoundServer::bind_with(&config, engine, hooks).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!(error = %e, "cannot start");
@@ -188,10 +220,17 @@ impl App {
                 match b {
                     Bound::Http(addr) => tracing::info!(%addr, "http listening"),
                     Bound::Grpc(addr) => tracing::info!(%addr, "grpc listening"),
+                    Bound::Tcp(addr) => tracing::info!(%addr, "tcp listening"),
+                    Bound::Admin(addr) => tracing::info!(%addr, "admin listening"),
                 }
             }
             let shutdown = CancellationToken::new();
             tokio::spawn(cancel_on_signal(shutdown.clone()));
+            tokio::spawn(reload_on_sighup(reloader.clone(), shutdown.clone()));
+            if config.reload.watch_interval_ms > 0 {
+                let every = std::time::Duration::from_millis(config.reload.watch_interval_ms);
+                tokio::spawn(watch_files(reloader, plans.clone(), services.clone(), every, shutdown.clone()));
+            }
             match server.run(shutdown).await {
                 Ok(()) => {
                     tracing::info!("stopped");
@@ -203,5 +242,86 @@ impl App {
                 }
             }
         })
+    }
+
+    fn build_engine(&self, config: &ServerConfig, plans: &Path, services: Option<&Path>) -> Result<Engine, String> {
+        let file = PlansFile::load(plans).map_err(|e| e.to_string())?;
+        let registry = self.load_services(services)?;
+        let max_queue = config.admission.and_then(|a| a.max_queue_ms).map(std::time::Duration::from_millis);
+        Engine::builder(self.registry.clone())
+            .history(config.reload.history)
+            .max_queue(max_queue)
+            .build(LoadInput {
+                plans: &file,
+                services: Arc::new(registry),
+                config_hash: Self::config_hash(plans, services),
+            })
+            .map_err(|d| d.to_string())
+    }
+}
+
+async fn run_reload(reloader: Reloader, trigger: &'static str) {
+    match tokio::task::spawn_blocking(move || reloader()).await {
+        Ok(Ok(version)) => tracing::info!(version, trigger, "reloaded"),
+        Ok(Err(e)) => {
+            for line in e.lines() {
+                tracing::error!(trigger, "reload rejected: {line}");
+            }
+        }
+        Err(e) => tracing::error!(trigger, error = %e, "reload task failed"),
+    }
+}
+
+/// Reload on SIGHUP until shutdown.
+async fn reload_on_sighup(reloader: Reloader, shutdown: CancellationToken) {
+    #[cfg(unix)]
+    {
+        let mut hup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot listen for SIGHUP");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                got = hup.recv() => {
+                    if got.is_none() {
+                        return;
+                    }
+                    run_reload(reloader.clone(), "sighup").await;
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (reloader, shutdown);
+    }
+}
+
+/// Poll the config files and reload when their contents change.
+async fn watch_files(
+    reloader: Reloader,
+    plans: PathBuf,
+    services: Option<PathBuf>,
+    every: std::time::Duration,
+    shutdown: CancellationToken,
+) {
+    let mut last = App::config_hash(&plans, services.as_deref());
+    let mut ticker = tokio::time::interval(every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = ticker.tick() => {
+                let now = App::config_hash(&plans, services.as_deref());
+                if now != last {
+                    last = now;
+                    run_reload(reloader.clone(), "file change").await;
+                }
+            }
+        }
     }
 }

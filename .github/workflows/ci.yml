@@ -29,6 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo check -p forkline-services --features tls
+      - run: cargo check -p forkline-server --features mimalloc
+      - run: cargo check -p forkline-server --features jemalloc
 
   msrv:
     name: minimum Rust version (1.88)

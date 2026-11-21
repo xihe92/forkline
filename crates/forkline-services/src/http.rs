@@ -15,6 +15,7 @@ use tower::{Service, ServiceExt};
 
 use crate::error::{ServiceError, ServiceErrorKind};
 use crate::stack::{StackConfig, layered};
+use crate::trace::CallTimings;
 
 /// An HTTP request relative to the service's base URL.
 #[derive(Clone, Debug)]
@@ -178,6 +179,7 @@ fn retryable(result: &Result<HttpResponse, ServiceError>) -> bool {
 pub struct HttpClient {
     name: Arc<str>,
     svc: BoxCloneSyncService<HttpRequest, HttpResponse, ServiceError>,
+    timings: CallTimings,
 }
 
 impl HttpClient {
@@ -187,7 +189,7 @@ impl HttpClient {
         S: Service<HttpRequest, Response = HttpResponse, Error = ServiceError> + Clone + Send + Sync + 'static,
         S::Future: Send + 'static,
     {
-        Self { name: Arc::from(name), svc: BoxCloneSyncService::new(svc) }
+        Self { name: Arc::from(name), svc: BoxCloneSyncService::new(svc), timings: CallTimings::new(name) }
     }
 
     /// A client over `transport` wrapped in the layers `stack` asks for.
@@ -196,7 +198,7 @@ impl HttpClient {
         S: Service<HttpRequest, Response = HttpResponse, Error = ServiceError> + Clone + Send + Sync + 'static,
         S::Future: Send + 'static,
     {
-        Self { name: Arc::from(name), svc: layered(transport, stack, retryable) }
+        Self { name: Arc::from(name), svc: layered(transport, stack, retryable), timings: CallTimings::new(name) }
     }
 
     /// A reqwest-backed client from settings.
@@ -210,13 +212,17 @@ impl HttpClient {
     }
 
     /// Send a request, bounded by the request's deadline and cancellation.
-    pub async fn call(&self, cx: &Ctx, req: HttpRequest) -> Result<HttpResponse, ServiceError> {
+    /// The inbound `traceparent` and `tracestate` headers are forwarded.
+    pub async fn call(&self, cx: &Ctx, mut req: HttpRequest) -> Result<HttpResponse, ServiceError> {
+        crate::trace::forward(cx, &mut req.headers);
+        let started = std::time::Instant::now();
         let call = tokio::time::timeout_at(cx.deadline(), self.svc.clone().oneshot(req));
         let result = tokio::select! {
             biased;
             () = cx.cancellation().cancelled() => Err(ServiceError::new(ServiceErrorKind::Cancelled, "request cancelled")),
             r = call => r.unwrap_or_else(|_| Err(ServiceError::new(ServiceErrorKind::Deadline, "request deadline passed"))),
         };
+        self.timings.record(result.is_ok(), started.elapsed());
         result.map_err(|e| e.with_service(&self.name))
     }
 

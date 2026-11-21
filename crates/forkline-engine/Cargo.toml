@@ -12,6 +12,7 @@ bytes.workspace = true
 forkline-core.workspace = true
 forkline-plan.workspace = true
 futures-util.workspace = true
+metrics.workspace = true
 petgraph.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time", "macros", "rt"] }

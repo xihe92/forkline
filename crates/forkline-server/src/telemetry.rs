@@ -23,3 +23,15 @@ pub fn init(config: &TelemetryConfig) {
         tracing::debug!("a tracing subscriber was already installed");
     }
 }
+
+/// Install the Prometheus recorder for the `metrics` facade and return the
+/// handle `/metrics` renders. Durations use histogram buckets from 0.5 ms to 10 s.
+pub fn install_metrics() -> Result<metrics_exporter_prometheus::PrometheusHandle, String> {
+    use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+    const BUCKETS: &[f64] = &[0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(Matcher::Suffix("_seconds".into()), BUCKETS)
+        .map_err(|e| e.to_string())?
+        .install_recorder()
+        .map_err(|e| e.to_string())
+}

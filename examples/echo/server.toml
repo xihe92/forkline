@@ -6,6 +6,21 @@ routes = { "/echo" = "echo", "/slow" = "slow" }
 addr = "127.0.0.1:50051"
 methods = { Echo = "echo", Slow = "slow" }
 
+[[tcp]]
+addr = "127.0.0.1:7000"
+plan = "echo"
+
+[admin]
+addr = "127.0.0.1:6789"
+
+[admission]
+red = 800
+green = 500
+max_queue_ms = 50
+
+[reload]
+watch_interval_ms = 1000
+
 [telemetry]
 log_format = "text"
 filter = "info"

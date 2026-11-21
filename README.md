@@ -12,7 +12,7 @@ rules, and plan reloads that never mix two configurations inside one request.
 
 ## Status
 
-Phases 1 to 3 of 5 are complete:
+Phases 1 to 4 of 5 are complete:
 
 | Area | State |
 | --- | --- |
@@ -22,14 +22,19 @@ Phases 1 to 3 of 5 are complete:
 | Engine: chains, forks, branches, multibranches, joins | done |
 | Merge rules with `on_conflict = "drop"` or `"error"` | done |
 | Deadlines, cancellation, panic isolation, detached forks | done |
-| Snapshot per request, atomic reload | done (triggers come in phase 4) |
+| Snapshot per request, atomic reload, rollback (last 5) | done |
 | HTTP (axum) and gRPC (tonic, raw bytes) adapters | done |
 | JSON or text logs with request spans | done |
 | Services from `services.toml`: HTTP and gRPC clients, timeout, retry budget, concurrency limit, circuit breaker | done |
 | Data-flow validation (`in` keys written upstream on every path) | done |
 | Subplans (`cx.execute_plan`) | done |
 | Module test kit (`forkline-testkit`) | done |
-| Admin API, admission control, metrics, framed TCP | phase 4 |
+| Admin API: health, readiness, metrics, snapshot, reload, rollback | done |
+| Reload triggers: admin API, SIGHUP, file watcher | done |
+| Admission control (red/green), immediate refusal, stale-request shedding | done |
+| Prometheus metrics for requests, nodes, services, reloads | done |
+| Length-delimited TCP adapter with pipelining | done |
+| Graceful drain with timeout; mimalloc or jemalloc feature | done |
 | Fuzzing, load and soak tests | phase 5 |
 
 ## How a request runs
@@ -205,6 +210,57 @@ assert_eq!(out.get::<String>("svc_response").map(String::as_str), Some("bold"));
 
 Joins run over a fork base and a list of paths, with the engine's merge rules.
 
+## Operating it
+
+```toml
+# server.toml
+[admin]
+addr = "127.0.0.1:6789"                # keep it private; also IP-allowlisted
+allow = ["127.0.0.1/32", "::1/128"]
+
+[admission]
+red = 800                              # refuse new requests at 800 in flight...
+green = 500                            # ...until back down to 500
+max_queue_ms = 50                      # shed requests that waited longer to start
+
+[reload]
+history = 5                            # snapshots kept for rollback
+watch_interval_ms = 1000               # reload when plans.toml or services.toml change
+
+[shutdown]
+drain_timeout_ms = 10000
+```
+
+| Endpoint (admin port) | Does |
+| --- | --- |
+| `GET /healthz` | 200 while the process runs |
+| `GET /readyz` | 200, or 503 once shutdown has started |
+| `GET /metrics` | Prometheus text |
+| `GET /admin/snapshot` | Version, config hash, plans, services, rollback history |
+| `POST /admin/reload` | Rebuild from the files and swap; 400 with every problem if invalid |
+| `POST /admin/rollback` | Swap back to the previous snapshot |
+
+`SIGHUP` also reloads. A failed reload leaves the running snapshot in place.
+Requests refused by admission control get HTTP 503 (with `Retry-After`),
+gRPC `RESOURCE_EXHAUSTED` or TCP status 4 at once, instead of queueing.
+
+On `SIGTERM` readiness turns false, listeners stop accepting, in-flight
+requests get up to `drain_timeout_ms`, the rest are answered "shutting down",
+detached paths get what time is left, and the admin listener stops last.
+
+Metrics: `forkline_requests_total{plan,outcome}`,
+`forkline_request_duration_seconds{plan}`,
+`forkline_node_duration_seconds{plan,node}`,
+`forkline_node_errors_total{plan,node,kind}`,
+`forkline_merge_conflicts_total{plan,node,key}`,
+`forkline_inflight_requests{listener}`,
+`forkline_admission_refused_total{listener}`,
+`forkline_service_call_duration_seconds{service,outcome}`,
+`forkline_reloads_total{result}`, `forkline_snapshot_version`.
+
+Inbound `traceparent` and `tracestate` headers are forwarded on every
+outbound HTTP and gRPC call.
+
 ## Benchmarks
 
 Engine overhead only: modules do no work and there is no network. Measured on
@@ -221,6 +277,14 @@ an Apple M5 laptop, release build.
 The proposed target is under 50 µs at p99 for the 7-node fork/join plan.
 `cargo bench -p forkline-engine --bench engine` covers map operations, plan
 shapes and dispatch cost (boxing each async node adds about 6 ns).
+
+Operational gate tests (`cargo test -p forkline-server --test ops -- --nocapture`),
+over real sockets on the same laptop:
+
+| Scenario | Result |
+| --- | --- |
+| 32 clients for 2 s while reloading every 10 ms | about 165 reloads, 19,000 requests, 0 failed |
+| 2x the admission limit at once (80 requests, red = 40, 100 ms work, 500 ms budget) | 40 admitted, p99 104 ms; 40 refused, p99 about 1 ms client-side including the HTTP round trip |
 
 ## Development
 
