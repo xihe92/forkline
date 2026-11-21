@@ -12,24 +12,47 @@ rules, and plan reloads that never mix two configurations inside one request.
 
 ## Status
 
-Phase 1 of 5 (foundations) is complete:
+Phases 1 and 2 of 5 are complete:
 
 | Area | State |
 | --- | --- |
 | Request map (interned slots, `Arc` values, dirty bitset) | done |
 | `interface!` data contracts | done |
 | Plan format, graph checks, module/kind/type/config checks | done |
-| Engine: straight chains, deadlines, cancellation, terminal node | done |
+| Engine: chains, forks, branches, multibranches, joins | done |
+| Merge rules with `on_conflict = "drop"` or `"error"` | done |
+| Deadlines, cancellation, panic isolation, detached forks | done |
 | Snapshot per request, atomic reload | done (triggers come in phase 4) |
 | HTTP (axum) and gRPC (tonic, raw bytes) adapters | done |
 | JSON or text logs with request spans | done |
-| Fork, branch, multibranch, join, merge rules | phase 2 |
 | Service registry, data-flow validation, test kit | phase 3 |
 | Admin API, admission control, metrics, framed TCP | phase 4 |
 | Fuzzing, load and soak tests | phase 5 |
 
-Plans that fork, branch or join pass validation but the phase 1 engine refuses
-to load them.
+## How a request runs
+
+Nodes in a straight line run inline on the request's task. At a fork (any
+non-branch node with two or more children) the paths run concurrently on that
+task, or on separate tasks when the node has `spawn = true`. A branch picks one
+labelled child; a multibranch picks any set of them.
+
+A join's module is called once per arriving path, serially. The join continues
+once no running path can still reach it, or as soon as its module returns
+`Done`, which cancels the paths still on their way. It then merges:
+
+1. keys the join module wrote keep the join's value;
+2. keys no path changed carry through;
+3. keys changed on one path take that path's value;
+4. keys changed on several paths are conflicts: dropped, or a
+   `merge_conflict` error, per the plan's `on_conflict` (default `error`).
+
+The reply goes out as soon as the encode node runs. Paths that cannot reach
+the encode node are detached: they finish under the request's deadline, their
+failures are logged, and shutdown waits for them up to
+`shutdown.drain_timeout_ms`.
+
+A module error, a panic, a deadline or a merge conflict cancels the request's
+other paths and runs the terminal node.
 
 ## Layout
 
@@ -127,15 +150,20 @@ forkline-plan check plans.toml           # graph rules only, no modules needed
 
 ## Benchmarks
 
-`cargo bench -p forkline-engine`. Phase 1 baseline on an Apple-silicon laptop,
-release build, mean time per request through `Engine::call` with no-op modules:
+Engine overhead only: modules do no work and there is no network. Measured on
+an Apple M5 laptop, release build.
 
-| Benchmark | Time |
-| --- | --- |
-| 3-node chain | 0.28 µs |
-| 7-node chain | 0.59 µs |
-| 15-node chain | 1.19 µs |
-| Boxed dynamic dispatch, per async node | about 6 ns over a static call |
+`cargo bench -p forkline-engine --bench latency` (200,000 sequential requests):
+
+| Plan | p50 | p99 | p99.9 |
+| --- | --- | --- | --- |
+| 7 nodes, straight chain | 0.75 µs | 0.96 µs | 1.08 µs |
+| 7 nodes, one fork and join | 1.67 µs | 2.12 µs | 2.25 µs |
+| Fan-out to 8 paths and join | 3.38 µs | 4.21 µs | 4.92 µs |
+
+The proposed target is under 50 µs at p99 for the 7-node fork/join plan.
+`cargo bench -p forkline-engine --bench engine` covers map operations, plan
+shapes and dispatch cost (boxing each async node adds about 6 ns).
 
 ## Development
 

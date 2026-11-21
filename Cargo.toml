@@ -23,11 +23,13 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 criterion = "0.8"
 fixedbitset = "0.5"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
 petgraph = { version = "0.8", default-features = false, features = ["std"] }
 proc-macro2 = "1"
+proptest = "1"
 quote = "1"
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }

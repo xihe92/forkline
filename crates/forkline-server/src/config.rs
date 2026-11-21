@@ -15,6 +15,9 @@
 //! [telemetry]
 //! log_format = "json"             # or "text"
 //! filter = "info"                 # RUST_LOG overrides it
+//!
+//! [shutdown]
+//! drain_timeout_ms = 10000        # wait for detached paths after listeners stop
 //! ```
 
 use std::collections::BTreeMap;
@@ -40,6 +43,28 @@ pub struct ServerConfig {
     /// Logging.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Shutdown behaviour.
+    #[serde(default)]
+    pub shutdown: ShutdownConfig,
+}
+
+/// Shutdown behaviour.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShutdownConfig {
+    /// How long to wait for detached paths after the listeners stop.
+    #[serde(default = "default_drain_timeout_ms")]
+    pub drain_timeout_ms: u64,
+}
+
+fn default_drain_timeout_ms() -> u64 {
+    10_000
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self { drain_timeout_ms: default_drain_timeout_ms() }
+    }
 }
 
 /// Tokio runtime settings.

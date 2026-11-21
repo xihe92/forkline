@@ -11,21 +11,28 @@ arc-swap.workspace = true
 bytes.workspace = true
 forkline-core.workspace = true
 forkline-plan.workspace = true
+futures-util.workspace = true
+petgraph.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time", "macros"] }
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["time", "macros", "rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tower.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio"] }
 forkline-macros.workspace = true
+proptest.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { workspace = true, features = ["util"] }
 
 [[bench]]
 name = "engine"
+harness = false
+
+[[bench]]
+name = "latency"
 harness = false
 
 [lints]

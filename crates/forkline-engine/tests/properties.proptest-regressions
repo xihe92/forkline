@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f1b752c90211657b158cd30fb726b095048394e810fbf30c78141db141c57080 # shrinks to sp = Leaf { delay: 0, fail: false }
+cc 8dea27365730a5370851984eae96c793b2b508c7a69cc7fb06dfc61ccc827b3e # shrinks to sp = Par([Seq(Leaf { delay: 3, fail: false }, Leaf { delay: 0, fail: false }), Leaf { delay: 0, fail: false }])

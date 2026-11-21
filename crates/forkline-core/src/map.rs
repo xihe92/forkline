@@ -104,6 +104,21 @@ impl RequestMap {
     pub fn clear_dirty(&mut self) {
         self.dirty.clear();
     }
+
+    /// The written-slots bitset.
+    pub fn dirty_bits(&self) -> &FixedBitSet {
+        &self.dirty
+    }
+
+    /// Mark every slot in `bits` as written, without changing values.
+    pub fn union_dirty(&mut self, bits: &FixedBitSet) {
+        self.dirty.union_with(bits);
+    }
+
+    /// A copy of the map with no slots marked written: the base a fork's paths start from.
+    pub fn clean_copy(&self) -> Self {
+        Self { values: self.values.clone(), dirty: FixedBitSet::with_capacity(self.values.len()) }
+    }
 }
 
 impl fmt::Debug for RequestMap {

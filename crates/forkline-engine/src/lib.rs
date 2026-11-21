@@ -5,13 +5,29 @@
 //! it until it finishes, so a reload never mixes two configurations inside
 //! one request.
 //!
-//! Phase 1 executes straight chains (decode, modules, encode). Plans that
-//! fork, branch or join pass validation but are refused by the engine until
-//! phase 2 adds the scheduler.
+//! # Execution model
+//!
+//! A request runs as a set of *segments*: straight runs of nodes executed
+//! inline on the request's task. A segment ends where the graph diverges (a
+//! fork, branch or multibranch), where it reaches a join, at the encode node,
+//! or at a leaf. Paths of a fork run concurrently on the request's task, or
+//! on separate tasks when the fork has `spawn = true`.
+//!
+//! A join receives one arrival per path that reaches it, calls its module
+//! once per arrival, serially, and fires once no running path can still
+//! reach it. It then applies the merge rules (see [`merge`]) relative to the
+//! map at the join's owning divergence point (its immediate dominator).
+//!
+//! The reply is sent as soon as the encode node has run. Paths that cannot
+//! reach the encode node are *detached*: they keep running under the
+//! request's deadline, their failures are logged rather than answered, and
+//! [`Engine::wait_detached`] waits for them at shutdown.
 
 #![forbid(unsafe_code)]
 
+mod analysis;
 mod exec;
+pub mod merge;
 mod service;
 
 use std::collections::BTreeMap;
@@ -21,10 +37,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use forkline_core::{Ctx, PlanError, Registry, Reply, RequestEnv, RequestId};
-use forkline_plan::{CompiledPlan, Diagnostic, Diagnostics, NodeId, PlansFile, compile_all};
+use forkline_plan::{CompiledPlan, Diagnostics, PlansFile, compile_all};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::Instrument;
 
+pub use analysis::ExecPlan;
 pub use service::PlanService;
 
 /// One request as an adapter hands it to the engine.
@@ -61,38 +79,6 @@ pub enum EngineError {
     },
 }
 
-/// A compiled plan plus the engine's precomputed execution order.
-#[derive(Debug)]
-pub struct ExecPlan {
-    /// The validated plan.
-    pub compiled: CompiledPlan,
-    /// Node order from root to encode (phase 1: plans are straight chains).
-    pub(crate) chain: Vec<NodeId>,
-}
-
-impl ExecPlan {
-    fn new(compiled: CompiledPlan) -> Result<Self, Diagnostic> {
-        let name = compiled.name.to_string();
-        let mut chain = Vec::with_capacity(compiled.nodes.len());
-        let mut current = Some(compiled.root);
-        while let Some(id) = current {
-            let Some(node) = compiled.node(id) else { break };
-            if node.children.len() > 1 || node.parents.len() > 1 {
-                return Err(Diagnostic {
-                    plan: name,
-                    node: Some(node.name.to_string()),
-                    message:
-                        "forks, branches and joins are not executed yet (phase 2); this engine runs straight chains"
-                            .into(),
-                });
-            }
-            chain.push(id);
-            current = node.children.first().map(|e| e.to);
-        }
-        Ok(Self { compiled, chain })
-    }
-}
-
 /// An immutable set of compiled plans.
 #[derive(Debug)]
 pub struct Snapshot {
@@ -105,18 +91,14 @@ pub struct Snapshot {
 impl Snapshot {
     fn build(version: u64, file: &PlansFile, registry: &Registry) -> Result<Self, Diagnostics> {
         let compiled = compile_all(file, registry)?;
-        let mut plans = BTreeMap::new();
-        let mut diags = Vec::new();
-        for (name, plan) in compiled {
-            let plan = Arc::try_unwrap(plan).unwrap_or_else(|shared| (*shared).clone());
-            match ExecPlan::new(plan) {
-                Ok(p) => {
-                    plans.insert(name, Arc::new(p));
-                }
-                Err(d) => diags.push(d),
-            }
-        }
-        if diags.is_empty() { Ok(Self { version, plans }) } else { Err(Diagnostics(diags)) }
+        let plans = compiled
+            .into_iter()
+            .map(|(name, plan)| {
+                let plan: CompiledPlan = Arc::try_unwrap(plan).unwrap_or_else(|shared| (*shared).clone());
+                (name, Arc::new(ExecPlan::new(plan)))
+            })
+            .collect();
+        Ok(Self { version, plans })
     }
 }
 
@@ -126,13 +108,19 @@ pub struct Engine {
     registry: Arc<Registry>,
     current: ArcSwap<Snapshot>,
     next_request: AtomicU64,
+    detached: TaskTracker,
 }
 
 impl Engine {
     /// Compile `plans` against `registry`. Fails with every problem found.
     pub fn new(registry: Arc<Registry>, plans: &PlansFile) -> Result<Self, Diagnostics> {
         let snapshot = Snapshot::build(1, plans, &registry)?;
-        Ok(Self { registry, current: ArcSwap::from_pointee(snapshot), next_request: AtomicU64::new(1) })
+        Ok(Self {
+            registry,
+            current: ArcSwap::from_pointee(snapshot),
+            next_request: AtomicU64::new(1),
+            detached: TaskTracker::new(),
+        })
     }
 
     /// The current snapshot.
@@ -161,6 +149,19 @@ impl Engine {
         PlanService::new(self.clone(), plan.into())
     }
 
+    /// Number of requests whose detached paths are still running.
+    pub fn detached_running(&self) -> usize {
+        self.detached.len()
+    }
+
+    /// Wait until every detached path has finished. Paths stop on their own
+    /// at their request's deadline at the latest.
+    pub async fn wait_detached(&self) {
+        self.detached.close();
+        self.detached.wait().await;
+        self.detached.reopen();
+    }
+
     /// Run `plan` for one request.
     pub async fn call(&self, plan: &str, request: Request) -> Result<Reply, EngineError> {
         let snapshot = self.current.load_full();
@@ -176,6 +177,6 @@ impl Engine {
             snapshot_version = snapshot.version,
         );
         let cx = Ctx::new(id, exec.compiled.name.clone(), span.clone(), deadline, CancellationToken::new(), env);
-        exec::run(&exec, &cx, body).instrument(span).await
+        exec::run(exec, cx, body, &self.detached).instrument(span).await
     }
 }

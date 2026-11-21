@@ -70,13 +70,21 @@ pub struct BoundServer {
     http: Vec<(TcpListener, axum::Router)>,
     grpc: Vec<(TcpListener, grpc::GrpcPlans)>,
     bound: Vec<Bound>,
+    engine: Arc<Engine>,
+    drain_timeout: std::time::Duration,
 }
 
 impl BoundServer {
     /// Check the config against the engine's plans and bind every listener.
     pub async fn bind(config: &ServerConfig, engine: Arc<Engine>) -> Result<Self, ServerError> {
         config.validate(&engine).map_err(ServerError::Config)?;
-        let mut server = BoundServer { http: Vec::new(), grpc: Vec::new(), bound: Vec::new() };
+        let mut server = BoundServer {
+            http: Vec::new(),
+            grpc: Vec::new(),
+            bound: Vec::new(),
+            engine: engine.clone(),
+            drain_timeout: std::time::Duration::from_millis(config.shutdown.drain_timeout_ms),
+        };
         for listener in &config.http {
             let tcp = bind(listener.addr).await?;
             server.bound.push(Bound::Http(local_addr(&tcp, listener.addr)?));
@@ -95,8 +103,8 @@ impl BoundServer {
         &self.bound
     }
 
-    /// Serve until `shutdown` is cancelled, then stop accepting and let
-    /// in-flight requests finish.
+    /// Serve until `shutdown` is cancelled, then stop accepting, let in-flight
+    /// requests finish, and wait up to the drain timeout for detached paths.
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), ServerError> {
         let mut tasks: JoinSet<Result<(), ServerError>> = JoinSet::new();
         for (tcp, router) in self.http {
@@ -128,6 +136,15 @@ impl BoundServer {
                 if result.is_ok() {
                     result = Err(e);
                 }
+            }
+        }
+        // Listeners have stopped and in-flight requests have answered; let
+        // detached paths finish (they stop at their own deadlines anyway).
+        let pending = self.engine.detached_running();
+        if pending > 0 {
+            tracing::info!(requests = pending, "waiting for detached paths");
+            if tokio::time::timeout(self.drain_timeout, self.engine.wait_detached()).await.is_err() {
+                tracing::warn!(requests = self.engine.detached_running(), "drain timeout; detached paths abandoned");
             }
         }
         result

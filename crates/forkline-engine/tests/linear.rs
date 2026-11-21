@@ -228,24 +228,6 @@ async fn the_plan_is_a_tower_service() {
     assert_eq!(reply.body, Bytes::from("svc!"));
 }
 
-#[tokio::test]
-async fn forks_are_refused_until_phase_2() {
-    let text = r#"
-        [plans.f]
-        root = "decode"
-        terminal = "error"
-        links = ["decode -> a", "decode -> b", "a -> encode"]
-        [plans.f.nodes]
-        decode = { module = "BodyDecoder" }
-        a      = { module = "Append" }
-        b      = { module = "Append" }
-        encode = { module = "TextEncoder" }
-        error  = { module = "ErrorReply" }
-    "#;
-    let err = Engine::new(registry(), &PlansFile::from_toml_str(text).unwrap()).unwrap_err();
-    assert!(err.to_string().contains("phase 2"), "{err}");
-}
-
 #[tokio::test(start_paused = true)]
 async fn reload_swaps_plans_and_in_flight_requests_keep_their_snapshot() {
     let e = Arc::new(engine(r#"{ suffix = "-old", sleep_ms = 20 }"#, "{}"));
