@@ -15,7 +15,7 @@ tls = ["reqwest/rustls"]
 bytes.workspace = true
 forkline-core.workspace = true
 http.workspace = true
-metrics.workspace = true
+prometheus-client.workspace = true
 reqwest = { workspace = true, features = ["http2"] }
 serde.workspace = true
 thiserror.workspace = true

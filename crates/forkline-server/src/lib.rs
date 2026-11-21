@@ -13,19 +13,13 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(all(feature = "mimalloc", feature = "jemalloc"))]
-compile_error!("enable at most one of the `mimalloc` and `jemalloc` features");
-
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub mod admin;
 pub mod admission;
+mod allow;
 pub mod cli;
 pub mod config;
 pub mod grpc;
@@ -40,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use forkline_engine::Engine;
-use metrics_exporter_prometheus::PrometheusHandle;
+use prometheus_client::registry::Registry as MetricsRegistry;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -97,8 +91,8 @@ pub enum Bound {
 pub struct Hooks {
     /// Called by `POST /admin/reload` (and the CLI's SIGHUP and file watcher).
     pub reloader: Option<Reloader>,
-    /// Rendered at `GET /metrics`.
-    pub metrics: Option<PrometheusHandle>,
+    /// Rendered at `GET /metrics` (see [`telemetry::metrics_registry`]).
+    pub metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl std::fmt::Debug for Hooks {
@@ -123,7 +117,6 @@ pub struct BoundServer {
     ready: Arc<AtomicBool>,
     hard_stop: CancellationToken,
     drain_timeout: Duration,
-    metrics: Option<PrometheusHandle>,
 }
 
 impl BoundServer {
@@ -152,7 +145,6 @@ impl BoundServer {
             ready: ready.clone(),
             hard_stop: hard_stop.clone(),
             drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
-            metrics: hooks.metrics.clone(),
         };
         for listener in &config.http {
             let tcp = bind(listener.addr).await?;
@@ -234,21 +226,6 @@ impl BoundServer {
             });
         }
         let admin_stop = CancellationToken::new();
-        // The Prometheus recorder buffers histogram samples until upkeep
-        // drains them; without this, memory grows with every request.
-        if let Some(handle) = self.metrics.clone() {
-            let stop = admin_stop.clone();
-            tokio::spawn(async move {
-                let mut every = tokio::time::interval(Duration::from_secs(5));
-                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    tokio::select! {
-                        () = stop.cancelled() => return,
-                        _ = every.tick() => handle.run_upkeep(),
-                    }
-                }
-            });
-        }
         let admin_task = self.admin.map(|(tcp, router)| {
             let stop = admin_stop.clone();
             tokio::spawn(async move {

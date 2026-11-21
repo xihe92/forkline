@@ -156,13 +156,7 @@ async fn segment(
 }
 
 fn count_error(plan: &ExecPlan, node: &str, kind: ErrorKind) {
-    metrics::counter!(
-        "forkline_node_errors_total",
-        "plan" => plan.compiled.name.to_string(),
-        "node" => node.to_owned(),
-        "kind" => kind.as_str(),
-    )
-    .increment(1);
+    crate::metrics_handles::node_error(&plan.compiled.name, node, kind);
 }
 
 /// The map at a divergence point, which joins it owns merge against.
@@ -377,13 +371,7 @@ impl Run {
                 conflicts.iter().map(|&s| plan.compiled.keys.info(s).map_or("?", |k| &*k.name)).collect();
             tracing::warn!(join = %name, keys = ?keys, policy = ?on_conflict, "merge conflict");
             for key in &keys {
-                metrics::counter!(
-                    "forkline_merge_conflicts_total",
-                    "plan" => plan.compiled.name.to_string(),
-                    "node" => name.to_string(),
-                    "key" => (*key).to_owned(),
-                )
-                .increment(1);
+                crate::metrics_handles::merge_conflict(&plan.compiled.name, &name, key);
             }
             if on_conflict == OnConflict::Error {
                 let message = format!("keys changed on more than one path: {}", keys.join(", "));

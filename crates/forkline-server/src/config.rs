@@ -284,7 +284,7 @@ impl ServerConfig {
         }
         if let Some(admin) = &self.admin {
             for net in &admin.allow {
-                if net.parse::<ipnet::IpNet>().is_err() && net.parse::<std::net::IpAddr>().is_err() {
+                if net.parse::<crate::allow::Network>().is_err() {
                     problems.push(format!("admin: `{net}` is not an IP address or network"));
                 }
             }

@@ -12,8 +12,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use forkline_engine::Engine;
-use ipnet::IpNet;
-use metrics_exporter_prometheus::PrometheusHandle;
+use prometheus_client::registry::Registry as MetricsRegistry;
 use serde_json::json;
 
 /// Rebuilds the snapshot from the config files and swaps it in; returns the new version.
@@ -23,18 +22,15 @@ pub type Reloader = Arc<dyn Fn() -> Result<u64, String> + Send + Sync>;
 pub(crate) struct AdminState {
     pub(crate) engine: Arc<Engine>,
     pub(crate) reloader: Option<Reloader>,
-    pub(crate) metrics: Option<PrometheusHandle>,
+    pub(crate) metrics: Option<Arc<MetricsRegistry>>,
     pub(crate) ready: Arc<AtomicBool>,
-    pub(crate) allow: Arc<Vec<IpNet>>,
+    pub(crate) allow: Arc<Vec<crate::allow::Network>>,
 }
 
 /// Parse allowlist entries (networks or single addresses). Validation has
 /// already rejected bad ones; any that slip through are skipped.
-pub(crate) fn parse_allow(entries: &[String]) -> Vec<IpNet> {
-    entries
-        .iter()
-        .filter_map(|e| e.parse::<IpNet>().ok().or_else(|| e.parse::<std::net::IpAddr>().ok().map(IpNet::from)))
-        .collect()
+pub(crate) fn parse_allow(entries: &[String]) -> Vec<crate::allow::Network> {
+    entries.iter().filter_map(|e| e.parse().ok()).collect()
 }
 
 pub(crate) fn router(state: AdminState) -> Router {
@@ -56,7 +52,7 @@ async fn allowlist(
     next: Next,
 ) -> Response {
     let ip = peer.ip().to_canonical();
-    if state.allow.iter().any(|net| net.contains(&ip)) {
+    if state.allow.iter().any(|net| net.contains(ip)) {
         next.run(req).await
     } else {
         tracing::warn!(%peer, "admin request from a disallowed address");
@@ -73,11 +69,16 @@ async fn readyz(State(state): State<AdminState>) -> Response {
 }
 
 async fn metrics(State(state): State<AdminState>) -> Response {
-    match &state.metrics {
-        Some(handle) => {
-            ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], handle.render()).into_response()
+    let Some(registry) = &state.metrics else {
+        return (StatusCode::NOT_FOUND, "metrics are not enabled").into_response();
+    };
+    let mut body = String::new();
+    match prometheus_client::encoding::text::encode(&mut body, registry) {
+        Ok(()) => {
+            ([(axum::http::header::CONTENT_TYPE, "application/openmetrics-text; version=1.0.0; charset=utf-8")], body)
+                .into_response()
         }
-        None => (StatusCode::NOT_FOUND, "metrics are not enabled").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("cannot encode metrics: {e}")).into_response(),
     }
 }
 

@@ -38,7 +38,7 @@ see "Before 1.0.0" for what remains.
 - Red/green admission control with immediate refusal.
 - Graceful drain: readiness flip, drain timeout, then cut-off.
 - Features: `otlp` (trace export, inbound trace context), `console`
-  (tokio-console), `mimalloc`, `jemalloc`.
+  (tokio-console), `jemalloc`.
 
 ### Tooling
 - `forkline-testkit` to run one module with typed inputs and mock services.
@@ -48,9 +48,17 @@ see "Before 1.0.0" for what remains.
   builds, a 10% benchmark-regression gate on pull requests, a short fuzz run.
 
 ### Fixed during hardening
-- The Prometheus recorder buffered every histogram sample until a scrape,
-  so memory grew with traffic (found by the soak test). The server now runs
-  the recorder's upkeep every 5 seconds.
+- The first metrics exporter buffered every histogram sample until a scrape,
+  so memory grew with traffic (found by the soak test).
+
+### Dependency review
+- Metrics now use the official Prometheus client (`prometheus-client`,
+  maintained by the Prometheus project) instead of `metrics` and
+  `metrics-exporter-prometheus`. `/metrics` serves OpenMetrics text; metric
+  names are unchanged.
+- The admin allowlist parses networks with the standard library instead of
+  `ipnet`.
+- The `mimalloc` feature is removed; `jemalloc` (TiKV) remains.
 
 ### Before 1.0.0
 - Choose a licence (plan decision 8) and set `license` and `publish`.

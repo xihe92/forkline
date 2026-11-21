@@ -7,8 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Use mimalloc or jemalloc as the global allocator (pick at most one).
-mimalloc = ["dep:mimalloc"]
+# Use jemalloc as the global allocator.
 jemalloc = ["dep:tikv-jemallocator"]
 # Export traces over OTLP (gRPC) and continue inbound W3C trace context.
 otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
@@ -25,10 +24,7 @@ forkline-plan.workspace = true
 forkline-services.workspace = true
 http.workspace = true
 http-body.workspace = true
-ipnet.workspace = true
-metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
-mimalloc = { workspace = true, optional = true }
+prometheus-client.workspace = true
 console-subscriber = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }

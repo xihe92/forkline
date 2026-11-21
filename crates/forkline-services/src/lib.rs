@@ -31,6 +31,11 @@ mod limit;
 mod stack;
 mod trace;
 
+/// The service clients' Prometheus metrics.
+pub mod metrics {
+    pub use crate::trace::register;
+}
+
 pub use breaker::BreakerConfig;
 pub use config::{ServiceConfig, ServiceKinds, ServicesFile};
 pub use error::{ServiceError, ServiceErrorKind};

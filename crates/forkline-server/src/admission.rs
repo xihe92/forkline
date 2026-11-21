@@ -9,7 +9,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use metrics::{Counter, Gauge};
+use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::registry::Registry;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::AdmissionConfig;
@@ -75,6 +79,20 @@ impl Drop for Admitted {
     }
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ListenerLabels {
+    listener: String,
+}
+
+static IN_FLIGHT: std::sync::LazyLock<Family<ListenerLabels, Gauge>> = std::sync::LazyLock::new(Family::default);
+static REFUSED: std::sync::LazyLock<Family<ListenerLabels, Counter>> = std::sync::LazyLock::new(Family::default);
+
+/// Add the listeners' metrics to `registry`.
+pub fn register(registry: &mut Registry) {
+    registry.register("forkline_inflight_requests", "Requests in flight per listener", IN_FLIGHT.clone());
+    registry.register("forkline_admission_refused", "Requests refused by admission control", REFUSED.clone());
+}
+
 /// What every adapter checks before calling the engine.
 #[derive(Clone, Debug)]
 pub(crate) struct Gate {
@@ -94,7 +112,7 @@ pub(crate) struct Pass {
 
 impl Drop for Pass {
     fn drop(&mut self) {
-        self.in_flight.decrement(1.0);
+        self.in_flight.dec();
     }
 }
 
@@ -102,8 +120,8 @@ impl Gate {
     pub(crate) fn new(admission: Option<Arc<Admission>>, listener: String, hard_stop: CancellationToken) -> Self {
         Self {
             admission,
-            in_flight: metrics::gauge!("forkline_inflight_requests", "listener" => listener.clone()),
-            refused: metrics::counter!("forkline_admission_refused_total", "listener" => listener),
+            in_flight: IN_FLIGHT.get_or_create(&ListenerLabels { listener: listener.clone() }).clone(),
+            refused: REFUSED.get_or_create(&ListenerLabels { listener }).clone(),
             hard_stop,
         }
     }
@@ -123,13 +141,13 @@ impl Gate {
             Some(a) => match a.try_admit() {
                 Some(admitted) => Some(admitted),
                 None => {
-                    self.refused.increment(1);
+                    self.refused.inc();
                     return None;
                 }
             },
             None => None,
         };
-        self.in_flight.increment(1.0);
+        self.in_flight.inc();
         Some(Pass { _admitted: admitted, in_flight: self.in_flight.clone() })
     }
 }

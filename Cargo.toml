@@ -30,10 +30,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-ipnet = "2"
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18", default-features = false }
-mimalloc = "0.1"
 console-subscriber = "0.5"
 opentelemetry = "0.33"
 opentelemetry_sdk = "0.33"
@@ -42,6 +38,7 @@ tracing-opentelemetry = "0.34"
 tikv-jemallocator = "0.7"
 petgraph = { version = "0.8", default-features = false, features = ["std"] }
 proc-macro2 = "1"
+prometheus-client = "0.26"
 proptest = "1"
 quote = "1"
 reqwest = { version = "0.13", default-features = false }

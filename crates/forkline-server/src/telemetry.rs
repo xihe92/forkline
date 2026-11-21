@@ -4,7 +4,7 @@
 //! * Traces (feature `otlp`): spans exported over OTLP/gRPC to `otlp_endpoint`;
 //!   inbound W3C `traceparent` becomes each request's parent.
 //! * tokio-console (feature `console`, built with `--cfg tokio_unstable`).
-//! * Metrics: a Prometheus recorder for the `metrics` facade.
+//! * Metrics: a registry on the official Prometheus client (`prometheus-client`).
 
 use http::HeaderMap;
 use tracing_subscriber::layer::SubscriberExt;
@@ -135,16 +135,14 @@ mod otlp {
     }
 }
 
-/// Install the Prometheus recorder for the `metrics` facade and return the
-/// handle `/metrics` renders. Durations use histogram buckets from 0.5 ms to 10 s.
-pub fn install_metrics() -> Result<metrics_exporter_prometheus::PrometheusHandle, String> {
-    use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-    const BUCKETS: &[f64] = &[0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
-    PrometheusBuilder::new()
-        .set_buckets_for_metric(Matcher::Suffix("_seconds".into()), BUCKETS)
-        .map_err(|e| e.to_string())?
-        .install_recorder()
-        .map_err(|e| e.to_string())
+/// A Prometheus registry holding every Forkline metric: engine, service
+/// clients and listeners. `GET /metrics` on the admin listener renders it.
+pub fn metrics_registry() -> std::sync::Arc<prometheus_client::registry::Registry> {
+    let mut registry = prometheus_client::registry::Registry::default();
+    forkline_engine::metrics::register(&mut registry);
+    forkline_services::metrics::register(&mut registry);
+    crate::admission::register(&mut registry);
+    std::sync::Arc::new(registry)
 }
 
 #[cfg(all(test, feature = "otlp"))]

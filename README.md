@@ -34,7 +34,7 @@ All five phases of the implementation plan are complete; this is release candida
 | Admission control (red/green), immediate refusal, stale-request shedding | done |
 | Prometheus metrics for requests, nodes, services, reloads | done |
 | Length-delimited TCP adapter with pipelining | done |
-| Graceful drain with timeout; mimalloc or jemalloc feature | done |
+| Graceful drain with timeout; jemalloc feature | done |
 | Fuzzing (plans, configs, TCP frames), load tests, soak script | done |
 | OTLP trace export (`otlp` feature), tokio-console (`console` feature) | done |
 
@@ -236,7 +236,7 @@ drain_timeout_ms = 10000
 | --- | --- |
 | `GET /healthz` | 200 while the process runs |
 | `GET /readyz` | 200, or 503 once shutdown has started |
-| `GET /metrics` | Prometheus text |
+| `GET /metrics` | Prometheus metrics (OpenMetrics text, official `prometheus-client`) |
 | `GET /admin/snapshot` | Version, config hash, plans, services, rollback history |
 | `POST /admin/reload` | Rebuild from the files and swap; 400 with every problem if invalid |
 | `POST /admin/rollback` | Swap back to the previous snapshot |

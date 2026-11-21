@@ -29,6 +29,11 @@ mod analysis;
 mod exec;
 pub mod merge;
 mod metrics_handles;
+
+/// The engine's Prometheus metrics.
+pub mod metrics {
+    pub use crate::metrics_handles::{DURATION_BUCKETS, register};
+}
 mod service;
 
 use std::collections::BTreeMap;
@@ -196,7 +201,7 @@ impl EngineBuilder {
     pub fn build(self, input: LoadInput<'_>) -> Result<Engine, Diagnostics> {
         let detached = TaskTracker::new();
         let snapshot = Snapshot::build(1, input, &self.registry, &detached)?;
-        metrics::gauge!("forkline_snapshot_version").set(1.0);
+        metrics_handles::snapshot_version(1);
         Ok(Engine {
             registry: self.registry,
             current: ArcSwap::from_pointee(snapshot),
@@ -297,13 +302,13 @@ impl Engine {
                         history.pop_front();
                     }
                 }
-                metrics::counter!("forkline_reloads_total", "result" => "ok").increment(1);
-                metrics::gauge!("forkline_snapshot_version").set(version as f64);
+                metrics_handles::reload("ok");
+                metrics_handles::snapshot_version(version);
                 tracing::info!(version, "snapshot swapped in");
                 Ok(version)
             }
             Err(d) => {
-                metrics::counter!("forkline_reloads_total", "result" => "error").increment(1);
+                metrics_handles::reload("error");
                 tracing::warn!(problems = d.len(), "reload rejected; the running snapshot stays");
                 Err(d)
             }
@@ -317,8 +322,8 @@ impl Engine {
         let previous = self.history.lock().ok()?.pop_back()?;
         let version = previous.version;
         self.current.store(previous);
-        metrics::counter!("forkline_reloads_total", "result" => "rollback").increment(1);
-        metrics::gauge!("forkline_snapshot_version").set(version as f64);
+        metrics_handles::reload("rollback");
+        metrics_handles::snapshot_version(version);
         tracing::warn!(version, "rolled back");
         Some(version)
     }

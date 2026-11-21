@@ -187,14 +187,7 @@ impl App {
         let plans = plans.to_path_buf();
         runtime.block_on(async move {
             let telemetry = telemetry::init(&config.telemetry);
-            // The recorder must exist before the engine so plan metric handles bind to it.
-            let metrics = match telemetry::install_metrics() {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    tracing::warn!(error = %e, "metrics disabled");
-                    None
-                }
-            };
+            let metrics = Some(telemetry::metrics_registry());
             let engine = match self.build_engine(&config, &plans, services.as_deref()) {
                 Ok(e) => Arc::new(e),
                 Err(e) => {
