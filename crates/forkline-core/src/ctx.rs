@@ -40,6 +40,7 @@ impl fmt::Display for RequestId {
 
 /// The inbound protocol a request arrived on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Protocol {
     /// HTTP/1.1 or HTTP/2 through the HTTP adapter.
     Http,

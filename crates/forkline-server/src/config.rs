@@ -224,6 +224,17 @@ pub struct TelemetryConfig {
     /// `tracing` filter directive; `RUST_LOG` overrides it.
     #[serde(default = "default_filter")]
     pub filter: String,
+    /// OTLP/gRPC collector endpoint for traces (needs the `otlp` feature),
+    /// e.g. `http://otel-collector:4317`.
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
+    /// Service name reported with traces.
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_service_name() -> String {
+    "forkline".into()
 }
 
 fn default_filter() -> String {
@@ -232,7 +243,12 @@ fn default_filter() -> String {
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
-        Self { log_format: LogFormat::default(), filter: default_filter() }
+        Self {
+            log_format: LogFormat::default(),
+            filter: default_filter(),
+            otlp_endpoint: None,
+            service_name: default_service_name(),
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 //! The test kit on a module with a mock service, a join, and the edge cases.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::time::Duration;
 

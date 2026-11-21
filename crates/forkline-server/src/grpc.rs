@@ -18,6 +18,7 @@ use forkline_core::{Protocol, RequestEnv, Status as ReplyStatus};
 use forkline_engine::{Engine, EngineError, Request};
 use tokio::time::Instant;
 use tonic::metadata::MetadataMap;
+use tracing::Instrument;
 
 pub use forkline_services::BytesCodec;
 
@@ -132,6 +133,7 @@ impl tonic::server::UnaryService<Bytes> for PlanUnary {
         let peer = request.remote_addr();
         let (metadata, _extensions, body) = request.into_parts();
         let headers = metadata.into_headers();
+        let span = crate::telemetry::inbound_span("grpc", &headers);
         let inbound_deadline = headers
             .get("grpc-timeout")
             .and_then(|v| v.to_str().ok())
@@ -140,7 +142,7 @@ impl tonic::server::UnaryService<Bytes> for PlanUnary {
         let env =
             RequestEnv { protocol: Protocol::Grpc, peer, received_at, inbound_deadline, route, metadata: headers };
         Box::pin(async move {
-            match engine.call(&plan, Request { body, env }).await {
+            match engine.call(&plan, Request { body, env }).instrument(span).await {
                 Ok(reply) => match reply.status {
                     ReplyStatus::Ok => {
                         let mut response = tonic::Response::new(reply.body);

@@ -1,5 +1,5 @@
 //! Phase 1 gate: the echo plan serves over real HTTP and gRPC sockets.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,7 +39,7 @@ async fn start() -> Running {
         match *b {
             Bound::Http(a) => http = Some(a),
             Bound::Grpc(a) => grpc = Some(a),
-            Bound::Tcp(_) | Bound::Admin(_) => {}
+            _ => {}
         }
     }
     let shutdown = CancellationToken::new();

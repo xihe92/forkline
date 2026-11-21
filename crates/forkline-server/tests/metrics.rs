@@ -1,6 +1,6 @@
 //! Prometheus metrics through the admin listener. Its own test binary,
 //! because the recorder is process-global.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 mod common;
 

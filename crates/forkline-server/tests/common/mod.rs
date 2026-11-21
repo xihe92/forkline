@@ -1,5 +1,5 @@
 //! Test modules and a server harness shared by the server's integration tests.
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic, unreachable_pub)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic, unreachable_pub, missing_docs)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -159,6 +159,7 @@ pub async fn start(config: &str, engine: Arc<Engine>, hooks: Hooks) -> Running {
             Bound::Grpc(a) => addrs.grpc = Some(a),
             Bound::Tcp(a) => addrs.tcp = Some(a),
             Bound::Admin(a) => addrs.admin = Some(a),
+            _ => {}
         }
     }
     let shutdown = CancellationToken::new();

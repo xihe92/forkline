@@ -23,6 +23,7 @@ pub struct ServiceRegistry {
 
 /// A service lookup failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServiceLookupError {
     /// No service of that name.
     #[error("service `{0}` is not registered")]

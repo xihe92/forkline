@@ -165,8 +165,13 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
         let set = format_ident!("set_{}", key);
         let get_mut = format_ident!("{}_mut", key);
         let unset = format_ident!("unset_{}", key);
+        let doc_get = format!("The value of `{key_str}`, if present.");
+        let doc_set = format!("Set `{key_str}`.");
+        let doc_mut = format!("Mutable access to `{key_str}`, if present (copied first if a fork shares it).");
+        let doc_unset = format!("Remove `{key_str}` from the map.");
         let getter = quote! {
             #(#attrs)*
+            #[doc = #doc_get]
             #[inline]
             pub fn #key(&self) -> ::core::option::Option<&#ty> {
                 let slot = #rt::slot_at(self.slots, #index)?;
@@ -175,6 +180,7 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
         };
         let setter = quote! {
             #(#attrs)*
+            #[doc = #doc_set]
             #[inline]
             pub fn #set(&mut self, value: #ty) {
                 if let ::core::option::Option::Some(slot) = #rt::slot_at(self.slots, #index) {
@@ -190,6 +196,7 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
                 methods.push(setter);
                 methods.push(quote! {
                     #(#attrs)*
+                    #[doc = #doc_mut]
                     #[inline]
                     pub fn #get_mut(&mut self) -> ::core::option::Option<&mut #ty> {
                         let slot = #rt::slot_at(self.slots, #index)?;
@@ -199,6 +206,7 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
             }
             Access::Unset => methods.push(quote! {
                 #(#attrs)*
+                #[doc = #doc_unset]
                 #[inline]
                 pub fn #unset(&mut self) {
                     if let ::core::option::Option::Some(slot) = #rt::slot_at(self.slots, #index) {
@@ -209,8 +217,14 @@ fn expand(def: InterfaceDef) -> syn::Result<TokenStream2> {
         }
     }
 
+    let has_doc = attrs.iter().any(|a| a.path().is_ident("doc"));
+    let default_doc = (!has_doc).then(|| {
+        let text = format!("Data contract `{name}`: a typed view of the request map.");
+        quote!(#[doc = #text])
+    });
     Ok(quote! {
         #(#attrs)*
+        #default_doc
         #vis struct #name<#lt> {
             map: &#lt mut #rt::RequestMap,
             slots: &#lt [#rt::Slot],

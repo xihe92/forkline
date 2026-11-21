@@ -1,0 +1,45 @@
+[package]
+name = "forkline-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+forkline-core = { path = "../crates/forkline-core" }
+forkline-engine = { path = "../crates/forkline-engine" }
+forkline-macros = { path = "../crates/forkline-macros" }
+forkline-plan = { path = "../crates/forkline-plan" }
+forkline-server = { path = "../crates/forkline-server" }
+forkline-services = { path = "../crates/forkline-services" }
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "io-util", "time", "macros"] }
+
+# Not part of the main workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "plans"
+path = "fuzz_targets/plans.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_frames"
+path = "fuzz_targets/tcp_frames.rs"
+test = false
+doc = false
+bench = false

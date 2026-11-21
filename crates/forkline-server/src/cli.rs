@@ -186,7 +186,7 @@ impl App {
         };
         let plans = plans.to_path_buf();
         runtime.block_on(async move {
-            telemetry::init(&config.telemetry);
+            let telemetry = telemetry::init(&config.telemetry);
             // The recorder must exist before the engine so plan metric handles bind to it.
             let metrics = match telemetry::install_metrics() {
                 Ok(handle) => Some(handle),
@@ -231,7 +231,7 @@ impl App {
                 let every = std::time::Duration::from_millis(config.reload.watch_interval_ms);
                 tokio::spawn(watch_files(reloader, plans.clone(), services.clone(), every, shutdown.clone()));
             }
-            match server.run(shutdown).await {
+            let code = match server.run(shutdown).await {
                 Ok(()) => {
                     tracing::info!("stopped");
                     ExitCode::SUCCESS
@@ -240,7 +240,9 @@ impl App {
                     tracing::error!(error = %e, "server failed");
                     ExitCode::FAILURE
                 }
-            }
+            };
+            telemetry.shutdown();
+            code
         })
     }
 

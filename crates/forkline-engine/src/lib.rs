@@ -71,6 +71,7 @@ impl Request {
 
 /// A request the engine could not answer with a reply.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EngineError {
     /// No plan of that name in the current snapshot.
     #[error("unknown plan `{0}`")]

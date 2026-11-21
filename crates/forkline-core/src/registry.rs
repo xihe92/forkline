@@ -182,6 +182,7 @@ impl Registry {
 
 /// A registration mistake found by [`RegistryBuilder::build`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RegistryError {
     /// The same name was registered more than once.
     #[error("module names registered more than once: {}", .0.iter().cloned().collect::<Vec<_>>().join(", "))]

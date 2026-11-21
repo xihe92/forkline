@@ -12,7 +12,7 @@ rules, and plan reloads that never mix two configurations inside one request.
 
 ## Status
 
-Phases 1 to 4 of 5 are complete:
+All five phases of the implementation plan are complete; this is release candidate 1.0.0-rc.1 (see [CHANGELOG.md](CHANGELOG.md)).
 
 | Area | State |
 | --- | --- |
@@ -35,7 +35,8 @@ Phases 1 to 4 of 5 are complete:
 | Prometheus metrics for requests, nodes, services, reloads | done |
 | Length-delimited TCP adapter with pipelining | done |
 | Graceful drain with timeout; mimalloc or jemalloc feature | done |
-| Fuzzing, load and soak tests | phase 5 |
+| Fuzzing (plans, configs, TCP frames), load tests, soak script | done |
+| OTLP trace export (`otlp` feature), tokio-console (`console` feature) | done |
 
 ## How a request runs
 
@@ -286,6 +287,23 @@ over real sockets on the same laptop:
 | 32 clients for 2 s while reloading every 10 ms | about 165 reloads, 19,000 requests, 0 failed |
 | 2x the admission limit at once (80 requests, red = 40, 100 ms work, 500 ms budget) | 40 admitted, p99 104 ms; 40 refused, p99 about 1 ms client-side including the HTTP round trip |
 
+## Load and soak
+
+Release builds on an Apple M5 laptop, client ([oha](https://github.com/hatoo/oha),
+64 connections), server and fake backend on the same machine:
+
+| Plan | Throughput | p50 | p99 | p99.9 | Errors |
+| --- | --- | --- | --- | --- | --- |
+| echo (3 nodes) over HTTP | 191,000 req/s | 0.31 ms | 1.02 ms | 2.81 ms | 0 |
+| horoscope (fork, branch, join, 2 backend HTTP calls per request) | 58,500 req/s | 1.06 ms | 1.97 ms | 3.15 ms | 0 |
+
+`scripts/soak.sh [seconds] [rate]` runs the horoscope example at a steady
+rate and samples the server's memory, threads and file descriptors; it fails
+if memory grows more than 10% between the second and last quarter of the run.
+A 10-minute run at 5,000 req/s served 3,000,000 requests with no errors
+(p99 1.04 ms) and memory flat at 24 MB (+0.2%). A 24-hour run is still to do
+before 1.0.0.
+
 ## Development
 
 ```sh
@@ -293,11 +311,15 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check
+cd fuzz && cargo +nightly fuzz run plans   # see fuzz/README.md
 ```
 
 The minimum supported Rust version is 1.88. Every crate forbids `unsafe` code,
-and library code may not `unwrap`, `expect` or `panic`.
+and library code may not `unwrap`, `expect` or `panic`. CI also builds every
+feature, runs a short fuzz pass, and fails a pull request whose benchmarks
+regress by more than 10% (`scripts/bench-check.py`).
 
 ## Licence
 
-Not yet chosen. The crates are marked `publish = false` until it is.
+Not yet chosen. The crates are marked `publish = false` until it is; see
+"Before 1.0.0" in the changelog.

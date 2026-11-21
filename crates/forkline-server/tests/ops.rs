@@ -1,7 +1,7 @@
 //! Phase 4 gate: reload under load drops nothing; 2x overload keeps admitted
 //! requests in budget and refuses the rest at once. Plus the admin API, the
 //! TCP adapter and the graceful drain.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 mod common;
 

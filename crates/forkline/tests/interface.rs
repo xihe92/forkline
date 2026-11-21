@@ -1,5 +1,5 @@
 //! The interface! macro through the public `forkline` path.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use bytes::Bytes;
 use forkline::{Access, Interface, RequestMap};

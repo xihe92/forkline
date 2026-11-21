@@ -1,5 +1,5 @@
 //! Subplans (`cx.execute_plan`) and services resolved at build time.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::sync::Arc;
 use std::time::Duration;

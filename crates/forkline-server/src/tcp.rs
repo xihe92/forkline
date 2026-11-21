@@ -25,7 +25,8 @@ use forkline_engine::{Engine, EngineError, Request};
 use futures_util::SinkExt;
 use futures_util::stream::{FuturesOrdered, StreamExt};
 use http::HeaderMap;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::time::Instant;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
@@ -129,7 +130,10 @@ async fn handle(conn: Conn, peer: SocketAddr, body: Bytes) -> Bytes {
     }
 }
 
-async fn connection(stream: TcpStream, peer: SocketAddr, conn: Conn, shutdown: CancellationToken) {
+async fn connection<IO>(stream: IO, peer: SocketAddr, conn: Conn, shutdown: CancellationToken)
+where
+    IO: AsyncRead + AsyncWrite + Send + Unpin,
+{
     let codec = LengthDelimitedCodec::builder().max_frame_length(conn.max_frame).new_codec();
     let (mut sink, mut frames) = Framed::new(stream, codec).split();
     let mut pending = FuturesOrdered::new();
@@ -159,4 +163,22 @@ async fn connection(stream: TcpStream, peer: SocketAddr, conn: Conn, shutdown: C
         }
     }
     let _ = sink.close().await;
+}
+
+/// Serve one connection over any byte stream, without admission control.
+/// For fuzzing and tests; servers use the listener configured in `server.toml`.
+#[doc(hidden)]
+pub async fn serve_stream<IO>(stream: IO, engine: Arc<Engine>, plan: &str, max_frame: usize, max_in_flight: usize)
+where
+    IO: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    let conn = Conn {
+        engine,
+        gate: Gate::new(None, "stream".into(), CancellationToken::new()),
+        plan: Arc::from(plan),
+        max_frame,
+        max_in_flight,
+    };
+    let peer = SocketAddr::from(([127, 0, 0, 1], 0));
+    connection(stream, peer, conn, CancellationToken::new()).await;
 }

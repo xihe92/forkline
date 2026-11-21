@@ -35,6 +35,7 @@ pub struct PlansFile {
 
 /// A plans file could not be read or parsed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// The file could not be read.
     #[error("cannot read {path}: {source}")]

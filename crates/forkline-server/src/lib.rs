@@ -55,6 +55,7 @@ use crate::config::TcpListenerConfig;
 
 /// The server could not start or stopped with an error.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServerError {
     /// Server configuration is invalid.
     #[error("server config: {0}")]
@@ -79,6 +80,7 @@ pub enum ServerError {
 
 /// A listener that is bound and ready to serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Bound {
     /// HTTP listener and its local address.
     Http(SocketAddr),
@@ -121,6 +123,7 @@ pub struct BoundServer {
     ready: Arc<AtomicBool>,
     hard_stop: CancellationToken,
     drain_timeout: Duration,
+    metrics: Option<PrometheusHandle>,
 }
 
 impl BoundServer {
@@ -149,6 +152,7 @@ impl BoundServer {
             ready: ready.clone(),
             hard_stop: hard_stop.clone(),
             drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
+            metrics: hooks.metrics.clone(),
         };
         for listener in &config.http {
             let tcp = bind(listener.addr).await?;
@@ -230,6 +234,21 @@ impl BoundServer {
             });
         }
         let admin_stop = CancellationToken::new();
+        // The Prometheus recorder buffers histogram samples until upkeep
+        // drains them; without this, memory grows with every request.
+        if let Some(handle) = self.metrics.clone() {
+            let stop = admin_stop.clone();
+            tokio::spawn(async move {
+                let mut every = tokio::time::interval(Duration::from_secs(5));
+                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        () = stop.cancelled() => return,
+                        _ = every.tick() => handle.run_upkeep(),
+                    }
+                }
+            });
+        }
         let admin_task = self.admin.map(|(tcp, router)| {
             let stop = admin_stop.clone();
             tokio::spawn(async move {

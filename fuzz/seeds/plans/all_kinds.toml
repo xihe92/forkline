@@ -1,0 +1,19 @@
+[plans.p]
+root = "d"
+terminal = "t"
+time_budget_ms = 50
+on_conflict = "drop"
+links = ["d -> m1", "d -> b", "b -> x : x", "b -> y : y", "m1 -> j", "x -> j", "y -> j", "j -> mb", "mb -> u : x", "mb -> v : y", "u -> j2", "v -> j2", "j2 -> e"]
+[plans.p.nodes]
+d  = { module = "Dec" }
+m1 = { module = "M1", config = { factor = 2 }, rename = { b = "bb" } }
+b  = { module = "Br" }
+x  = { module = "M2" }
+y  = { module = "M1", config = { factor = 1 } }
+j  = { module = "J" }
+mb = { module = "Mb" }
+u  = { module = "M2" }
+v  = { module = "M2", spawn = false }
+j2 = { module = "J" }
+e  = { module = "Enc" }
+t  = { module = "Term" }

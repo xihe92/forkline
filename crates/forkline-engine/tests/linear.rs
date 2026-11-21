@@ -1,5 +1,5 @@
 //! Linear plan execution: success, module errors, deadlines, terminal failure, reload.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -14,6 +14,7 @@ use forkline_engine::{Engine, EngineError, Request};
 use http::{HeaderMap, StatusCode};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::admission::Gate;
 use crate::status::http_status;
@@ -36,6 +37,7 @@ pub(crate) fn gated_router(engine: Arc<Engine>, routes: &BTreeMap<String, String
             post(move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes| {
                 let received_at = Instant::now();
                 let pass = gate.enter();
+                let span = crate::telemetry::inbound_span("http", &headers);
                 let env = RequestEnv {
                     protocol: Protocol::Http,
                     peer: Some(peer),
@@ -46,7 +48,7 @@ pub(crate) fn gated_router(engine: Arc<Engine>, routes: &BTreeMap<String, String
                 };
                 async move {
                     let Some(_pass) = pass else { return overloaded() };
-                    match gate.guard(engine.call(&plan, Request { body, env })).await {
+                    match gate.guard(engine.call(&plan, Request { body, env })).instrument(span).await {
                         Some(result) => to_response(result),
                         None => shutting_down(),
                     }

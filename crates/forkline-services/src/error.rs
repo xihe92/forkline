@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 /// What kind of failure a service call hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ServiceErrorKind {
     /// One attempt exceeded the service's `timeout_ms`.
     Timeout,

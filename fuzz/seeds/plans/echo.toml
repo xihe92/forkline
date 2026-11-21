@@ -1,0 +1,25 @@
+# Echo the request body back, prefixed.
+[plans.echo]
+root = "decode"
+terminal = "error"
+time_budget_ms = 100
+links = ["decode -> echo", "echo -> encode"]
+
+[plans.echo.nodes]
+decode = { module = "BodyDecoder" }
+echo   = { module = "Echo", config = { prefix = "echo: ", reject_empty = true } }
+encode = { module = "ReplyEncoder" }
+error  = { module = "ErrorReply" }
+
+# Same chain with 50 ms of artificial latency, for deadline demos.
+[plans.slow]
+root = "decode"
+terminal = "error"
+time_budget_ms = 1000
+links = ["decode -> echo", "echo -> encode"]
+
+[plans.slow.nodes]
+decode = { module = "BodyDecoder" }
+echo   = { module = "Echo", config = { delay_ms = 50 } }
+encode = { module = "ReplyEncoder" }
+error  = { module = "ErrorReply" }

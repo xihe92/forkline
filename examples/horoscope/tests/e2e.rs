@@ -1,6 +1,6 @@
 //! Phase 3 gate: the horoscope/stock/time application end to end against
 //! wiremock backends, through the engine and through the real HTTP server.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::sync::Arc;
 use std::time::Duration;

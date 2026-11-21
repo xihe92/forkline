@@ -81,6 +81,7 @@ impl fmt::Debug for Inputs {
 
 /// Why a harness run did not produce a result.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TestError {
     /// A value's type does not match the contract or an earlier value.
     #[error("key `{key}` is `{expected}`, but the test gave a `{given}`")]

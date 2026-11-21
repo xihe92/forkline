@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// Why a plan did not finish normally.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// The request itself was invalid (maps to HTTP 400 / INVALID_ARGUMENT).
     BadRequest,
@@ -135,6 +136,7 @@ impl PlanError {
 
 /// A module could not be built from its configuration.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BuildError {
     /// The node's `config` table did not match the module's config type.
     #[error("invalid config: {0}")]

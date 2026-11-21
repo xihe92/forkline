@@ -1,6 +1,6 @@
 //! Property tests: merge rules against a reference model, and scheduling
 //! invariants on randomly generated series-parallel plans with branches.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;

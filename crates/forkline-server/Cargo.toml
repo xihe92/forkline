@@ -10,6 +10,10 @@ publish.workspace = true
 # Use mimalloc or jemalloc as the global allocator (pick at most one).
 mimalloc = ["dep:mimalloc"]
 jemalloc = ["dep:tikv-jemallocator"]
+# Export traces over OTLP (gRPC) and continue inbound W3C trace context.
+otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+# tokio-console support; build with RUSTFLAGS="--cfg tokio_unstable".
+console = ["dep:console-subscriber"]
 
 [dependencies]
 axum = { workspace = true, features = ["http1", "http2", "tokio"] }
@@ -25,6 +29,11 @@ ipnet.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 mimalloc = { workspace = true, optional = true }
+console-subscriber = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["sink"] }
 serde_json.workspace = true
 tikv-jemallocator = { workspace = true, optional = true }

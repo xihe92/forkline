@@ -1,5 +1,5 @@
 //! Phase 2: forks, branches, joins, merge rules, cancellation, panics, detached paths.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::sync::Arc;
 use std::time::Duration;
