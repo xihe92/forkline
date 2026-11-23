@@ -220,4 +220,37 @@ mod tests {
         assert_eq!(stack.clone().oneshot(5).await, Ok(10), "the half-open trial succeeds and closes it");
         assert_eq!(stack.oneshot(6).await, Ok(12));
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_half_open_trial_reopens_and_other_calls_are_refused_meanwhile() {
+        let (svc, calls) = flaky(2, 50, ServiceErrorKind::Transport);
+        let config = StackConfig { breaker: Some(BreakerConfig { failures: 1, open_ms: 100 }), ..Default::default() };
+        let stack = layered(svc, &config, retry_all);
+        assert_eq!(stack.clone().oneshot(1).await.unwrap_err().kind, ServiceErrorKind::Transport);
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // The trial call is in flight: the breaker lets nothing else through.
+        let trial = tokio::spawn(stack.clone().oneshot(1));
+        tokio::task::yield_now().await;
+        assert_eq!(stack.clone().oneshot(1).await.unwrap_err().kind, ServiceErrorKind::CircuitOpen);
+        assert_eq!(trial.await.unwrap().unwrap_err().kind, ServiceErrorKind::Transport, "the trial fails");
+
+        // A failed trial opens the breaker again for the full period.
+        assert_eq!(stack.clone().oneshot(1).await.unwrap_err().kind, ServiceErrorKind::CircuitOpen);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert_eq!(stack.oneshot(4).await, Ok(8), "the next trial succeeds");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_shedding_the_limit_queues_callers() {
+        let (svc, calls) = flaky(0, 100, ServiceErrorKind::Transport);
+        let config = StackConfig { concurrency_limit: Some(1), ..Default::default() };
+        let stack = layered(svc, &config, retry_all);
+        let started = tokio::time::Instant::now();
+        let (a, b) = tokio::join!(stack.clone().oneshot(1), stack.clone().oneshot(2));
+        assert_eq!((a, b), (Ok(2), Ok(4)), "the second caller waited its turn instead of failing");
+        assert_eq!(started.elapsed(), Duration::from_millis(200), "one at a time");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 }

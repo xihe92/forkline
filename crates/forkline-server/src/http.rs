@@ -1,17 +1,19 @@
-//! HTTP adapter: each configured path runs a plan on POST.
+//! HTTP adapter: each configured path runs a plan on GET or POST. The body
+//! (empty for a GET) goes to the decoder; the query string is in
+//! [`RequestEnv::query`].
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::ConnectInfo;
+use axum::extract::{ConnectInfo, DefaultBodyLimit};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{MethodFilter, on};
 use bytes::Bytes;
 use forkline_core::{Protocol, Reply, RequestEnv, Status};
 use forkline_engine::{Engine, EngineError, Request};
-use http::{HeaderMap, StatusCode};
+use http::{HeaderMap, StatusCode, Uri};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -22,10 +24,20 @@ use crate::status::http_status;
 /// Build the router for one listener, without admission control. Serve it
 /// with `into_make_service_with_connect_info::<SocketAddr>()`.
 pub fn router(engine: Arc<Engine>, routes: &BTreeMap<String, String>) -> Router {
-    gated_router(engine, routes, Gate::new(None, "http".into(), CancellationToken::new()))
+    gated_router(
+        engine,
+        routes,
+        crate::config::DEFAULT_MAX_BODY_BYTES,
+        Gate::new(None, "http".into(), CancellationToken::new()),
+    )
 }
 
-pub(crate) fn gated_router(engine: Arc<Engine>, routes: &BTreeMap<String, String>, gate: Gate) -> Router {
+pub(crate) fn gated_router(
+    engine: Arc<Engine>,
+    routes: &BTreeMap<String, String>,
+    max_body: usize,
+    gate: Gate,
+) -> Router {
     let mut router = Router::new();
     for (path, plan) in routes {
         let engine = engine.clone();
@@ -34,29 +46,33 @@ pub(crate) fn gated_router(engine: Arc<Engine>, routes: &BTreeMap<String, String
         let route: Arc<str> = Arc::from(path.as_str());
         router = router.route(
             path,
-            post(move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes| {
-                let received_at = Instant::now();
-                let pass = gate.enter();
-                let span = crate::telemetry::inbound_span("http", &headers);
-                let env = RequestEnv {
-                    protocol: Protocol::Http,
-                    peer: Some(peer),
-                    received_at,
-                    inbound_deadline: None,
-                    route: route.to_string(),
-                    metadata: headers,
-                };
-                async move {
-                    let Some(_pass) = pass else { return overloaded() };
-                    match gate.guard(engine.call(&plan, Request { body, env })).instrument(span).await {
-                        Some(result) => to_response(result),
-                        None => shutting_down(),
+            on(
+                MethodFilter::GET.or(MethodFilter::POST),
+                move |ConnectInfo(peer): ConnectInfo<SocketAddr>, uri: Uri, headers: HeaderMap, body: Bytes| {
+                    let received_at = Instant::now();
+                    let pass = gate.enter();
+                    let span = crate::telemetry::inbound_span("http", &headers);
+                    let env = RequestEnv {
+                        protocol: Protocol::Http,
+                        peer: Some(peer),
+                        received_at,
+                        inbound_deadline: None,
+                        route: route.to_string(),
+                        query: uri.query().map(str::to_owned),
+                        metadata: headers,
+                    };
+                    async move {
+                        let Some(_pass) = pass else { return overloaded() };
+                        match gate.guard(engine.call(&plan, Request { body, env })).instrument(span).await {
+                            Some(result) => to_response(result),
+                            None => shutting_down(),
+                        }
                     }
-                }
-            }),
+                },
+            ),
         );
     }
-    router
+    router.layer(DefaultBodyLimit::max(max_body))
 }
 
 fn shutting_down() -> Response {

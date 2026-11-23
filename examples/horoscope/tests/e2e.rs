@@ -154,10 +154,7 @@ async fn the_plan_budget_caps_everything() {
         Engine::with_services(Arc::new(forkline_horoscope::registry().unwrap()), &plans, Arc::new(services)).unwrap();
     let started = std::time::Instant::now();
     let (status, json) = query(&e, r#"{"sign": "leo"}"#).await;
-    assert!(
-        matches!(status, Status::Error(ErrorKind::Deadline) | Status::Error(ErrorKind::Module)),
-        "{status:?} {json}"
-    );
+    assert_eq!(status, Status::Error(ErrorKind::Deadline), "a deadline, whichever timer fires first: {json}");
     assert!(json["message"].as_str().unwrap().contains("deadline"), "{json}");
     assert!(started.elapsed() < Duration::from_millis(300), "stopped near the 80 ms budget");
 }

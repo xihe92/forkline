@@ -47,6 +47,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 forkline-macros.workspace = true
 reqwest.workspace = true
+tonic = { workspace = true, features = ["channel"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "sync"] }
 
 [lints]

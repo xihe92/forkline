@@ -211,5 +211,32 @@ mod tests {
         assert!(ServicesFile::from_toml_str("[services.a]\nurl = \"x\"\n").unwrap_err().contains("missing `kind`"));
         assert!(ServicesFile::from_toml_str("[services.a]\nkind = \"http\"\nretries = \"x\"\n").is_err());
         assert!(ServicesFile::from_toml_str("[other]\n").unwrap_err().contains("unknown top-level key"));
+        assert_eq!(ServicesFile::from_toml_str("services = 1\n").unwrap_err(), "`services` must be a table");
+        assert_eq!(ServicesFile::from_toml_str("[services]\na = 1\n").unwrap_err(), "service `a` must be a table");
+        assert_eq!(
+            ServicesFile::from_toml_str("[services.a]\nkind = 1\n").unwrap_err(),
+            "service `a`: `kind` must be a string"
+        );
+        assert!(ServicesFile::from_toml_str("not toml").is_err());
+        let err = ServicesFile::load("/nonexistent/services.toml").unwrap_err();
+        assert!(err.starts_with("cannot read /nonexistent/services.toml:"), "{err}");
+    }
+
+    #[test]
+    fn grpc_urls_are_checked_and_code_kinds_can_be_added() {
+        let file = ServicesFile::from_toml_str("[services.g]\nkind = \"grpc\"\nurl = \"not a url\"\n").unwrap();
+        let problems = ServiceKinds::default().build(&file).unwrap_err();
+        assert!(problems[0].starts_with("service `g`: invalid url `not a url`"), "{problems:?}");
+
+        let file = ServicesFile::from_toml_str("[services.n]\nkind = \"number\"\nvalue = 7\n").unwrap();
+        let kinds = ServiceKinds::empty().register("number", |name, config, registry| {
+            let value = config.settings.get("value").and_then(toml::Value::as_integer).ok_or("missing value")?;
+            registry.insert(name, value);
+            Ok(())
+        });
+        let registry = kinds.build(&file).unwrap();
+        assert_eq!(registry.get::<i64>("n").unwrap(), 7);
+        let problems = ServiceKinds::empty().build(&file).unwrap_err();
+        assert!(problems[0].contains("unknown kind `number`"), "{problems:?}");
     }
 }

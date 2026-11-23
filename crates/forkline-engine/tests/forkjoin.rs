@@ -243,29 +243,159 @@ impl Terminal for Show {
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct FaultConfig {
+    fail: bool,
+    panic: bool,
+}
+
+/// A join that fails or panics on the first arrival.
+struct FaultyJoin(FaultConfig);
+impl Build for FaultyJoin {
+    type Config = FaultConfig;
+    fn build(c: FaultConfig) -> Result<Self, BuildError> {
+        Ok(Self(c))
+    }
+}
+impl Join for FaultyJoin {
+    type Io<'a> = Empty<'a>;
+    fn on_path(&self, _: &Ctx, _: Empty<'_>, _: Empty<'_>) -> Result<JoinStep, NodeError> {
+        assert!(!self.0.panic, "join boom");
+        if self.0.fail {
+            return Err(NodeError::msg("join refused"));
+        }
+        Ok(JoinStep::Wait)
+    }
+}
+
+/// Panics in every node kind that runs synchronously.
+struct Boom;
+impl Build for Boom {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Branch for Boom {
+    type Io<'a> = Empty<'a>;
+    fn choose(&self, _: &Ctx, _: Empty<'_>) -> Result<&'static str, NodeError> {
+        panic!("branch boom")
+    }
+}
+impl MultiBranch for Boom {
+    type Io<'a> = Empty<'a>;
+    fn choose(&self, _: &Ctx, _: Empty<'_>) -> Result<Vec<&'static str>, NodeError> {
+        panic!("multibranch boom")
+    }
+}
+impl Encode for Boom {
+    type Io<'a> = Empty<'a>;
+    fn encode(&self, _: &Ctx, _: Empty<'_>) -> Result<Reply, NodeError> {
+        panic!("encode boom")
+    }
+}
+impl Terminal for Boom {
+    type Io<'a> = Empty<'a>;
+    fn respond(&self, _: &Ctx, _: Empty<'_>, _: &PlanError) -> Result<Reply, NodeError> {
+        panic!("terminal boom")
+    }
+}
+
+/// Gives up on the whole request by cancelling it, then returns Ok.
+struct CancelRequest;
+impl Build for CancelRequest {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Module for CancelRequest {
+    type Io<'a> = Empty<'a>;
+    async fn call(&self, cx: &Ctx, _: Empty<'_>) -> Result<(), NodeError> {
+        cx.cancellation().cancel();
+        Ok(())
+    }
+}
+
+/// Computes `k` on the blocking pool, or panics there.
+struct Blocking(FaultConfig);
+impl Build for Blocking {
+    type Config = FaultConfig;
+    fn build(c: FaultConfig) -> Result<Self, BuildError> {
+        Ok(Self(c))
+    }
+}
+impl Module for Blocking {
+    type Io<'a> = KeysOut<'a>;
+    async fn call(&self, cx: &Ctx, mut io: KeysOut<'_>) -> Result<(), NodeError> {
+        let panic = self.0.panic;
+        let value = cx
+            .blocking(move || {
+                assert!(!panic, "blocking boom");
+                (1..=10).sum::<i64>()
+            })
+            .await?;
+        io.set_k(value);
+        Ok(())
+    }
+}
+
+/// Like a service client: waits on a slow backend bounded by the request
+/// deadline, and turns the cut-off into its own (non-deadline) error.
+struct DeadlineBound;
+impl Build for DeadlineBound {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Module for DeadlineBound {
+    type Io<'a> = Empty<'a>;
+    async fn call(&self, cx: &Ctx, _: Empty<'_>) -> Result<(), NodeError> {
+        let slow = tokio::time::sleep(Duration::from_secs(60));
+        tokio::time::timeout_at(cx.deadline(), slow).await.map_err(|_| NodeError::msg("backend call timed out"))
+    }
+}
+
 fn registry() -> Arc<Registry> {
     Arc::new(
         Registry::builder()
             .decode::<Seed>("Seed")
             .module::<Write>("Write")
+            .module::<CancelRequest>("CancelRequest")
+            .module::<Blocking>("Blocking")
+            .module::<DeadlineBound>("DeadlineBound")
             .encode::<Dump>("Dump")
+            .encode::<Boom>("BoomEncode")
             .join::<SumA>("SumA")
             .join::<Pass>("Pass")
             .join::<First>("First")
+            .join::<FaultyJoin>("FaultyJoin")
             .branch::<Pick>("Pick")
+            .branch::<Boom>("BoomBranch")
             .multi_branch::<MultiPick>("MultiPick")
+            .multi_branch::<Boom>("BoomMulti")
             .terminal::<Show>("Show")
+            .terminal::<Boom>("BoomTerminal")
             .build()
             .unwrap(),
     )
 }
 
-/// A plan named `p` from links and node lines; `error` and `encode` are added.
+/// A plan named `p` from links and node lines; `error` and `encode` are
+/// added unless `nodes` defines them.
 fn engine(header: &str, links: &[&str], nodes: &str) -> Engine {
     let links: Vec<String> = links.iter().map(|l| format!("\"{l}\"")).collect();
+    let mut defaults = String::new();
+    if !nodes.contains("encode ") {
+        defaults.push_str("encode = { module = \"Dump\" }\n");
+    }
+    if !nodes.contains("error ") {
+        defaults.push_str("error = { module = \"Show\" }\n");
+    }
     let text = format!(
-        "[plans.p]\nroot = \"decode\"\nterminal = \"error\"\n{header}\nlinks = [{}]\n[plans.p.nodes]\n\
-         encode = {{ module = \"Dump\" }}\nerror = {{ module = \"Show\" }}\n{nodes}",
+        "[plans.p]\nroot = \"decode\"\nterminal = \"error\"\n{header}\nlinks = [{}]\n[plans.p.nodes]\n{defaults}{nodes}",
         links.join(", ")
     );
     Engine::new(registry(), &PlansFile::from_toml_str(&text).unwrap()).unwrap_or_else(|e| panic!("{e}\n{text}"))
@@ -584,4 +714,231 @@ async fn spawned_forks_give_the_same_result() {
     for _ in 0..50 {
         assert_eq!(body(&call(&e).await), "a=5 f=2 g=3");
     }
+}
+
+// ---- Failure paths ----
+
+#[tokio::test]
+async fn a_join_that_fails_or_panics_fails_the_request() {
+    let links = ["decode -> x", "decode -> y", "x -> join", "y -> join", "join -> encode"];
+    let nodes = |join: &str| {
+        format!(
+            "decode = {{ module = \"Seed\" }}\nx = {{ module = \"Write\", config = {{ set = [\"k\"], value = 1 }} }}\n\
+             y = {{ module = \"Write\", config = {{ set = [\"m\"], value = 2 }} }}\njoin = {join}\n"
+        )
+    };
+    let e = engine("", &links, &nodes(r#"{ module = "FaultyJoin", config = { fail = true } }"#));
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Module));
+    assert_eq!(body(&reply), "join: join refused");
+
+    let e = engine("", &links, &nodes(r#"{ module = "FaultyJoin", config = { panic = true } }"#));
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Panic));
+    assert_eq!(body(&reply), "join: panicked: join boom");
+}
+
+#[tokio::test]
+async fn panics_in_branches_and_the_encoder_are_isolated() {
+    let e = engine(
+        "",
+        &["decode -> pick", "pick -> x : x", "pick -> y : y", "x -> join", "y -> join", "join -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        pick   = { module = "BoomBranch" }
+        x      = { module = "Write" }
+        y      = { module = "Write" }
+        join   = { module = "Pass" }
+        "#,
+    );
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Panic));
+    assert_eq!(body(&reply), "pick: panicked: branch boom");
+
+    let e = engine(
+        "",
+        &["decode -> pick", "pick -> x : x", "pick -> y : y", "x -> join", "y -> join", "join -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        pick   = { module = "BoomMulti" }
+        x      = { module = "Write" }
+        y      = { module = "Write" }
+        join   = { module = "Pass" }
+        "#,
+    );
+    assert_eq!(body(&call(&e).await), "pick: panicked: multibranch boom");
+
+    let e = engine("", &["decode -> encode"], "decode = { module = \"Seed\" }\nencode = { module = \"BoomEncode\" }\n");
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Panic));
+    assert_eq!(body(&reply), "encode: panicked: encode boom");
+}
+
+#[tokio::test]
+async fn a_panicking_terminal_is_an_engine_error() {
+    let e = engine(
+        "",
+        &["decode -> x", "x -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        x      = { module = "Write", config = { fail = true } }
+        error  = { module = "BoomTerminal" }
+        "#,
+    );
+    match e.call("p", Request::in_process("")).await.unwrap_err() {
+        forkline_engine::EngineError::TerminalFailed { error, terminal, message } => {
+            assert_eq!(&*terminal, "error");
+            assert_eq!(message, "panicked: terminal boom");
+            assert_eq!((&*error.node, error.kind), ("x", ErrorKind::Module));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn detached_paths_are_cancelled_at_the_deadline() {
+    let e = engine(
+        "time_budget_ms = 100",
+        &["decode -> main", "decode -> side", "main -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        main   = { module = "Write", config = { set = ["k"], value = 1 } }
+        side   = { module = "Write", config = { delay_ms = 5000, counter = "detached-too-slow" } }
+        "#,
+    );
+    let started = Instant::now();
+    assert_eq!(body(&call(&e).await), "k=1");
+    assert_eq!(e.detached_running(), 1);
+    e.wait_detached().await;
+    assert_eq!(started.elapsed(), Duration::from_millis(100), "stopped at the request's deadline");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(count("detached-too-slow"), 0, "the slow path never finished");
+    assert_eq!(e.detached_running(), 0);
+}
+
+#[tokio::test]
+async fn a_multibranch_that_picks_nothing_fails_the_request() {
+    let e = engine(
+        "",
+        &["decode -> mb", "mb -> x : x", "mb -> y : y", "x -> join", "y -> join", "join -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        mb     = { module = "MultiPick", config = { labels = [] } }
+        x      = { module = "Write" }
+        y      = { module = "Write" }
+        join   = { module = "Pass" }
+        "#,
+    );
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Internal));
+    assert_eq!(body(&reply), "p: no running path can reach the encode node");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paths_that_finish_after_a_done_join_are_discarded() {
+    // Both spawned paths finish at once, so the second one often arrives
+    // after the join has fired. It must never be merged.
+    let e = engine(
+        "",
+        &["decode -> x", "decode -> y", "x -> join", "y -> join", "join -> encode"],
+        r#"
+        decode = { module = "Seed", spawn = true }
+        x      = { module = "Write", config = { set = ["k"], value = 1 } }
+        y      = { module = "Write", config = { set = ["m"], value = 2 } }
+        join   = { module = "First" }
+        "#,
+    );
+    for _ in 0..200 {
+        let text = body(&call(&e).await);
+        assert!(text == "k=1" || text == "m=2", "exactly one path is merged: {text}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_between_two_nodes_stops_the_next_one() {
+    let e = engine(
+        "time_budget_ms = 50",
+        &["decode -> a", "a -> b", "b -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        a      = { module = "Write", config = { delay_ms = 50 } }
+        b      = { module = "Write", config = { set = ["k"], value = 1, counter = "after-deadline" } }
+        "#,
+    );
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Deadline));
+    assert_eq!(body(&reply), "b: deadline passed before the node started");
+    assert_eq!(count("after-deadline"), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_error_caused_by_the_deadline_is_reported_as_a_deadline() {
+    // The module's own timer and the engine's fire at the same instant; the
+    // module's error must still come back as a deadline, not a module error.
+    let e = engine(
+        "time_budget_ms = 80",
+        &["decode -> call", "call -> encode"],
+        "decode = { module = \"Seed\" }\ncall = { module = \"DeadlineBound\" }\n",
+    );
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Deadline), "{}", body(&reply));
+    assert_eq!(body(&reply), "call: deadline passed: backend call timed out");
+}
+
+#[tokio::test]
+async fn a_request_cancelled_before_its_reply_is_reported_as_cancelled() {
+    let e = engine(
+        "",
+        &["decode -> cancel", "cancel -> x", "x -> encode"],
+        r#"
+        decode = { module = "Seed" }
+        cancel = { module = "CancelRequest" }
+        x      = { module = "Write", config = { set = ["k"], value = 1, counter = "after-cancel" } }
+        "#,
+    );
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Cancelled));
+    assert_eq!(body(&reply), "p: the request was cancelled before a reply");
+    assert_eq!(count("after-cancel"), 0);
+}
+
+#[tokio::test]
+async fn blocking_work_runs_off_the_runtime_and_its_panics_are_caught() {
+    let e =
+        engine("", &["decode -> b", "b -> encode"], "decode = { module = \"Seed\" }\nb = { module = \"Blocking\" }\n");
+    assert_eq!(body(&call(&e).await), "k=55");
+
+    let e = engine(
+        "",
+        &["decode -> b", "b -> encode"],
+        "decode = { module = \"Seed\" }\nb = { module = \"Blocking\", config = { panic = true } }\n",
+    );
+    let reply = call(&e).await;
+    assert_eq!(reply.status, Status::Error(ErrorKind::Internal));
+    assert!(body(&reply).starts_with("b: blocking task failed:"), "{}", body(&reply));
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_a_request_cancels_its_spawned_paths() {
+    // A client that disconnects drops the request's future; paths on their
+    // own tasks must stop too, not run on unobserved.
+    let e = Arc::new(engine(
+        "",
+        &["decode -> x", "decode -> y", "x -> join", "y -> join", "join -> encode"],
+        r#"
+        decode = { module = "Seed", spawn = true }
+        x      = { module = "Write", config = { delay_ms = 200, counter = "orphan-x" } }
+        y      = { module = "Write", config = { delay_ms = 200, counter = "orphan-y" } }
+        join   = { module = "Pass" }
+        "#,
+    ));
+    let request = tokio::spawn({
+        let e = e.clone();
+        async move { e.call("p", Request::in_process("")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!((count("orphan-x"), count("orphan-y")), (0, 0), "spawned paths were aborted");
 }

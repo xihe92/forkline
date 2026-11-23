@@ -94,3 +94,41 @@ async fn connection_failures_are_transport_errors() {
     let err = c.get(&cx(Duration::from_secs(2)), "/").await.unwrap_err();
     assert_eq!(err.kind, ServiceErrorKind::Transport, "{err}");
 }
+
+#[tokio::test]
+async fn bad_gateway_and_gateway_timeout_are_retried_but_500_is_not() {
+    let server = MockServer::start().await;
+    for (route, status) in [("/b502", 502), ("/b504", 504)] {
+        Mock::given(path(route)).respond_with(ResponseTemplate::new(status)).up_to_n_times(1).mount(&server).await;
+        Mock::given(path(route)).respond_with(ResponseTemplate::new(200).set_body_string("ok")).mount(&server).await;
+    }
+    Mock::given(path("/b500")).respond_with(ResponseTemplate::new(500)).expect(1).mount(&server).await;
+    let c = client(&server, StackConfig { retries: 1, ..Default::default() });
+    let cx = cx(Duration::from_secs(5));
+    assert_eq!(c.get(&cx, "/b502").await.unwrap().text().unwrap(), "ok");
+    assert_eq!(c.get(&cx, "/b504").await.unwrap().text().unwrap(), "ok");
+    let err = c.get(&cx, "/b500").await.unwrap_err();
+    assert_eq!(err.kind, ServiceErrorKind::Status, "a 500 is the backend's answer, not a transient failure");
+    assert_eq!(err.to_string(), "service `backend`: status: HTTP 500 Internal Server Error");
+    // `expect(1)` is checked when the server drops: the 500 was not retried.
+}
+
+#[tokio::test]
+async fn a_cancelled_request_stops_its_call() {
+    let server = MockServer::start().await;
+    Mock::given(path("/slow"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let c = client(&server, StackConfig::default());
+    let cx = cx(Duration::from_secs(10));
+    let cancel = cx.cancellation().clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    let started = std::time::Instant::now();
+    let err = c.get(&cx, "/slow").await.unwrap_err();
+    assert_eq!(err.kind, ServiceErrorKind::Cancelled);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}

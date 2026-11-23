@@ -60,6 +60,47 @@ see "Before 1.0.0" for what remains.
   `ipnet`.
 - The `mimalloc` feature is removed; `jemalloc` (TiKV) remains.
 
+### After rc.1
+- HTTP routes accept GET as well as POST; the raw query string is in the new
+  `RequestEnv::query` field (`None` for gRPC, TCP and in-process calls).
+- Outbound gRPC calls send `grpc-timeout` with the time left before the
+  request's deadline, computed again on each retry. `GrpcRequest` has a new
+  `deadline` field, so code that builds one must set it.
+
+### Fixes after rc.1
+- A reload or rollback that removes a plan a listener serves is now rejected
+  (`Engine::require_plans`, set when the server binds). Before, it was
+  accepted and the route answered 404 "plan not loaded".
+- A module that fails once the deadline has passed (typically a service call
+  bounded by the same deadline) is reported as `Deadline` (504), not `Module`
+  (500); which one you got used to depend on which timer fired first.
+- gRPC service calls that fail after the request's deadline report
+  `ServiceErrorKind::Deadline` instead of `Cancelled` or a retryable `Timeout`
+  (backends now see our `grpc-timeout` and give up at the same moment).
+- A request cancelled before its reply reports `ErrorKind::Cancelled` (503)
+  instead of `Internal`.
+- HTTP listeners take `max_body_bytes` (default 2 MiB, axum's previous
+  implicit limit); larger bodies get 413.
+
+### Tests after rc.1
+- Engine: failing and panicking joins, panics in every node kind including
+  the error node, detached paths cancelled at the deadline, a multibranch
+  that picks nothing, late arrivals at a fired join, the deadline between
+  nodes, `cx.blocking`, dropped requests aborting spawned paths, reloads
+  that replace services, served plans across reload and rollback.
+- Server: every outcome on HTTP, gRPC and TCP; admission on every protocol;
+  freed admission slots on client disconnect; the drain cut-off on gRPC and
+  TCP; detached paths waited for and abandoned at shutdown; `server.toml`
+  validation; the TCP adapter's owed responses, abandoned pipelines and
+  in-flight limit.
+- CLI: `check` and `serve` exit codes, reload on SIGHUP and on file change,
+  rejected reloads, clean exit on SIGTERM (the real binary); `App` reloads of
+  plans and services from files; the `forkline-plan check` binary.
+- Services: breaker half-open behaviour, queueing at the concurrency limit,
+  HTTP 502/504 retried and 500 not, gRPC status mapping, deadline,
+  cancellation and connection failures, `services.toml` shape errors.
+- CI fails below 88% line coverage (90% today, up from 81%).
+
 ### Before 1.0.0
 - Choose a licence (plan decision 8) and set `license` and `publish`.
 - Run `scripts/soak.sh` for 24 hours on production-like hardware.

@@ -36,8 +36,7 @@ pub mod metrics {
 }
 mod service;
 
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,7 +47,7 @@ use forkline_core::node::BoxFuture;
 use forkline_core::{
     Ctx, CtxParts, NodeError, PlanError, PlanRunner, Registry, Reply, RequestEnv, RequestId, ServiceRegistry,
 };
-use forkline_plan::{CompiledPlan, Diagnostics, PlansFile, compile_all_with};
+use forkline_plan::{CompiledPlan, Diagnostic, Diagnostics, PlansFile, compile_all_with};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -209,6 +208,7 @@ impl EngineBuilder {
             history_len: self.history,
             last_version: AtomicU64::new(1),
             reload_lock: Mutex::new(()),
+            required: Mutex::new(BTreeSet::new()),
             next_request: AtomicU64::new(1),
             max_queue_nanos: AtomicU64::new(
                 self.max_queue.map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)),
@@ -227,6 +227,8 @@ pub struct Engine {
     history_len: usize,
     last_version: AtomicU64,
     reload_lock: Mutex<()>,
+    /// Plans that listeners serve; a reload or rollback may not remove them.
+    required: Mutex<BTreeSet<String>>,
     next_request: AtomicU64,
     max_queue_nanos: AtomicU64,
     detached: TaskTracker,
@@ -287,12 +289,43 @@ impl Engine {
         self.load(LoadInput { plans, services, config_hash: 0 })
     }
 
+    /// Mark plans as served by a listener: from now on a reload or rollback
+    /// that would remove one of them is rejected. The server calls this when
+    /// it binds its listeners.
+    pub fn require_plans<I, S>(&self, plans: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut required = self.required.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        required.extend(plans.into_iter().map(Into::into));
+    }
+
+    /// Required plans missing from `plans`, as one diagnostic each.
+    fn missing_required(&self, plans: &BTreeMap<String, Arc<ExecPlan>>) -> Diagnostics {
+        let required = self.required.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        required
+            .iter()
+            .filter(|name| !plans.contains_key(*name))
+            .map(|name| Diagnostic {
+                plan: name.clone(),
+                node: None,
+                message: "is served by a listener, so the new configuration must keep it".into(),
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     /// Build a snapshot from `input` and swap it in. Returns its version.
     pub fn load(&self, input: LoadInput<'_>) -> Result<u64, Diagnostics> {
         // One load at a time, so versions and history stay in order.
         let _guard = self.reload_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let version = self.last_version.load(Ordering::Relaxed) + 1;
-        match Snapshot::build(version, input, &self.registry, &self.detached) {
+        let built = Snapshot::build(version, input, &self.registry, &self.detached).and_then(|snapshot| {
+            let missing = self.missing_required(&snapshot.plans);
+            if missing.is_empty() { Ok(snapshot) } else { Err(missing) }
+        });
+        match built {
             Ok(snapshot) => {
                 self.last_version.store(version, Ordering::Relaxed);
                 let old = self.current.swap(Arc::new(snapshot));
@@ -316,10 +349,19 @@ impl Engine {
     }
 
     /// Swap back to the previous snapshot. Returns its version, or `None`
-    /// when there is nothing to roll back to.
+    /// when there is nothing to roll back to, or when the previous snapshot
+    /// lacks a plan a listener serves (see [`require_plans`](Self::require_plans)).
     pub fn rollback(&self) -> Option<u64> {
         let _guard = self.reload_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = self.history.lock().ok()?.pop_back()?;
+        let mut history = self.history.lock().ok()?;
+        let previous = history.pop_back()?;
+        let missing = self.missing_required(&previous.plans);
+        if !missing.is_empty() {
+            tracing::warn!(version = previous.version, problems = %missing, "rollback refused");
+            history.push_back(previous);
+            return None;
+        }
+        drop(history);
         let version = previous.version;
         self.current.store(previous);
         metrics_handles::reload("rollback");

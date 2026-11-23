@@ -103,6 +103,13 @@ async fn segment(
                     outcome = timed => match outcome {
                         Err(_elapsed) => Err(NodeError::new(ErrorKind::Deadline, "deadline passed while the node was running")),
                         Ok(Err(panic)) => Err(NodeError::new(ErrorKind::Panic, panic_message(&*panic))),
+                        // A module that fails once the deadline has passed
+                        // was cut off by it (a service call bounded by the
+                        // same deadline can return just before the timer
+                        // above fires), so report it as a deadline.
+                        Ok(Ok(Err(e))) if e.kind() != ErrorKind::Deadline && Instant::now() >= cx.deadline() => {
+                            Err(NodeError::new(ErrorKind::Deadline, format!("deadline passed: {}", e.message())))
+                        }
                         Ok(Ok(result)) => result.map(|()| Step::Next),
                     },
                 }
@@ -450,10 +457,20 @@ impl Run {
                 return Ok(reply);
             }
             if !self.reply_possible() {
-                let error = PlanError {
-                    kind: ErrorKind::Internal,
-                    node: self.plan.compiled.name.clone(),
-                    message: "no running path can reach the encode node".into(),
+                // Paths stop early when the request is cancelled; that is a
+                // cancellation, not a broken plan.
+                let error = if self.cx.is_cancelled() {
+                    PlanError {
+                        kind: ErrorKind::Cancelled,
+                        node: self.plan.compiled.name.clone(),
+                        message: "the request was cancelled before a reply".into(),
+                    }
+                } else {
+                    PlanError {
+                        kind: ErrorKind::Internal,
+                        node: self.plan.compiled.name.clone(),
+                        message: "no running path can reach the encode node".into(),
+                    }
                 };
                 return Err((error, self.empty_map()));
             }

@@ -38,8 +38,13 @@ impl Build for BodyDecoder {
 }
 impl Decode for BodyDecoder {
     type Io<'a> = BodyIo<'a>;
-    fn decode(&self, _: &Ctx, body: &Bytes, mut io: BodyIo<'_>) -> Result<(), NodeError> {
-        io.set_payload(body.clone());
+    /// The payload is the body, or the query string when the body is empty.
+    fn decode(&self, cx: &Ctx, body: &Bytes, mut io: BodyIo<'_>) -> Result<(), NodeError> {
+        let payload = match &cx.env().query {
+            Some(q) if body.is_empty() => Bytes::from(q.clone()),
+            _ => body.clone(),
+        };
+        io.set_payload(payload);
         Ok(())
     }
 }
@@ -72,8 +77,11 @@ impl Module for Work {
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
-        if text == "bad" {
-            return Err(NodeError::bad_request("bad input"));
+        match text.as_str() {
+            "bad" => return Err(NodeError::bad_request("bad input")),
+            "fail" => return Err(NodeError::msg("module failed")),
+            "panic" => panic!("module panicked"),
+            _ => {}
         }
         io.set_reply(Bytes::from(format!("{text}{}", self.0.suffix)));
         Ok(())
@@ -108,16 +116,68 @@ impl Terminal for ErrorReply {
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct MarkConfig {
+    pub delay_ms: u64,
+    pub name: String,
+}
+
+static MARKS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How many times a `Mark` node named `name` has finished.
+pub fn marks(name: &str) -> u32 {
+    MARKS.lock().unwrap().get(name).copied().unwrap_or(0)
+}
+
+/// Waits `delay_ms`, then counts itself under `name`.
+pub struct Mark(MarkConfig);
+impl Build for Mark {
+    type Config = MarkConfig;
+    fn build(c: MarkConfig) -> Result<Self, BuildError> {
+        Ok(Self(c))
+    }
+}
+impl Module for Mark {
+    type Io<'a> = Empty<'a>;
+    async fn call(&self, _: &Ctx, _: Empty<'_>) -> Result<(), NodeError> {
+        tokio::time::sleep(Duration::from_millis(self.0.delay_ms)).await;
+        *MARKS.lock().unwrap().entry(self.0.name.clone()).or_default() += 1;
+        Ok(())
+    }
+}
+
+/// An error node that fails too, so the request has no reply at all.
+pub struct BrokenReply;
+impl Build for BrokenReply {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Terminal for BrokenReply {
+    type Io<'a> = Empty<'a>;
+    fn respond(&self, _: &Ctx, _: Empty<'_>, _: &PlanError) -> Result<Reply, NodeError> {
+        Err(NodeError::msg("the error node broke"))
+    }
+}
+
+/// The test modules, for code that takes a `Registry` by value.
+pub fn modules() -> Registry {
+    Registry::builder()
+        .decode::<BodyDecoder>("BodyDecoder")
+        .module::<Work>("Work")
+        .module::<Mark>("Mark")
+        .encode::<ReplyEncoder>("ReplyEncoder")
+        .terminal::<ErrorReply>("ErrorReply")
+        .terminal::<BrokenReply>("BrokenReply")
+        .build()
+        .unwrap()
+}
+
 pub fn registry() -> Arc<Registry> {
-    Arc::new(
-        Registry::builder()
-            .decode::<BodyDecoder>("BodyDecoder")
-            .module::<Work>("Work")
-            .encode::<ReplyEncoder>("ReplyEncoder")
-            .terminal::<ErrorReply>("ErrorReply")
-            .build()
-            .unwrap(),
-    )
+    Arc::new(modules())
 }
 
 /// One plan per (name, suffix, delay_ms, budget_ms).
@@ -133,6 +193,61 @@ pub fn plans(specs: &[(&str, &str, u64, u64)]) -> PlansFile {
         ));
     }
     PlansFile::from_toml_str(&text).unwrap()
+}
+
+/// Plan `name` as in [`plans`], with an error node that fails.
+pub fn broken_terminal_plan(name: &str) -> PlansFile {
+    let text = format!(
+        "[plans.{name}]\nroot = \"decode\"\nterminal = \"error\"\nlinks = [\"decode -> work\", \"work -> encode\"]\n\
+         [plans.{name}.nodes]\ndecode = {{ module = \"BodyDecoder\" }}\nwork = {{ module = \"Work\" }}\n\
+         encode = {{ module = \"ReplyEncoder\" }}\nerror = {{ module = \"BrokenReply\" }}\n"
+    );
+    PlansFile::from_toml_str(&text).unwrap()
+}
+
+/// Plan `name`: replies at once, and a detached `side` path marks
+/// `mark` after `side_ms`.
+pub fn detached_plan(name: &str, mark: &str, side_ms: u64, budget_ms: u64) -> PlansFile {
+    let text = format!(
+        "[plans.{name}]\nroot = \"decode\"\nterminal = \"error\"\ntime_budget_ms = {budget_ms}\n\
+         links = [\"decode -> work\", \"work -> encode\", \"decode -> side\"]\n[plans.{name}.nodes]\n\
+         decode = {{ module = \"BodyDecoder\" }}\nwork = {{ module = \"Work\" }}\n\
+         side = {{ module = \"Mark\", config = {{ delay_ms = {side_ms}, name = \"{mark}\" }} }}\n\
+         encode = {{ module = \"ReplyEncoder\" }}\nerror = {{ module = \"ErrorReply\" }}\n"
+    );
+    PlansFile::from_toml_str(&text).unwrap()
+}
+
+/// One unary call to `/forkline.v1.Plans/<method>`.
+pub async fn grpc_call(addr: SocketAddr, method: &str, body: &str) -> Result<Bytes, tonic::Status> {
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}")).unwrap().connect().await.unwrap();
+    let mut client = tonic::client::Grpc::new(channel);
+    client.ready().await.unwrap();
+    let request = tonic::Request::new(Bytes::from(body.to_owned()));
+    let path = http::uri::PathAndQuery::try_from(format!("/forkline.v1.Plans/{method}")).unwrap();
+    client.unary(request, path, forkline_server::grpc::BytesCodec).await.map(tonic::Response::into_inner)
+}
+
+pub async fn send_frame(stream: &mut tokio::net::TcpStream, body: &[u8]) {
+    use bytes::BufMut;
+    use tokio::io::AsyncWriteExt;
+    let mut buf = bytes::BytesMut::with_capacity(4 + body.len());
+    buf.put_u32(u32::try_from(body.len()).unwrap());
+    buf.put_slice(body);
+    stream.write_all(&buf).await.unwrap();
+}
+
+/// The next response frame as (status byte, body), or `None` once the server closed.
+pub async fn read_frame(stream: &mut tokio::net::TcpStream) -> Option<(u8, Bytes)> {
+    use bytes::Buf;
+    use tokio::io::AsyncReadExt;
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).await.ok()?;
+    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+    stream.read_exact(&mut body).await.ok()?;
+    let mut body = Bytes::from(body);
+    let status = body.get_u8();
+    Some((status, body))
 }
 
 #[derive(Debug, Default)]
@@ -170,6 +285,14 @@ pub async fn start(config: &str, engine: Arc<Engine>, hooks: Hooks) -> Running {
 impl Running {
     pub fn http(&self, path: &str) -> String {
         format!("http://{}{path}", self.addrs.http.unwrap())
+    }
+
+    pub fn grpc(&self) -> SocketAddr {
+        self.addrs.grpc.unwrap()
+    }
+
+    pub async fn tcp(&self) -> tokio::net::TcpStream {
+        tokio::net::TcpStream::connect(self.addrs.tcp.unwrap()).await.unwrap()
     }
 
     pub fn admin(&self, path: &str) -> String {

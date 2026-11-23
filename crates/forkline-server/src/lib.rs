@@ -128,6 +128,8 @@ impl BoundServer {
     /// Like [`bind`](Self::bind), with a reloader and a metrics handle for the admin listener.
     pub async fn bind_with(config: &ServerConfig, engine: Arc<Engine>, hooks: Hooks) -> Result<Self, ServerError> {
         config.validate(&engine).map_err(ServerError::Config)?;
+        // From here on, a reload that drops a plan a listener serves is rejected.
+        engine.require_plans(config.served_plans());
         let admission = config.admission.as_ref().map(|a| Arc::new(Admission::new(a)));
         if let Some(a) = &config.admission {
             engine.set_max_queue(a.max_queue_ms.map(Duration::from_millis));
@@ -151,7 +153,9 @@ impl BoundServer {
             let addr = local_addr(&tcp, listener.addr)?;
             server.bound.push(Bound::Http(addr));
             let gate = Gate::new(admission.clone(), format!("http:{addr}"), hard_stop.clone());
-            server.http.push((tcp, http::gated_router(engine.clone(), &listener.routes, gate)));
+            server
+                .http
+                .push((tcp, http::gated_router(engine.clone(), &listener.routes, listener.max_body_bytes, gate)));
         }
         for listener in &config.grpc {
             let tcp = bind(listener.addr).await?;

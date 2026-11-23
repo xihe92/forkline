@@ -139,8 +139,15 @@ impl tonic::server::UnaryService<Bytes> for PlanUnary {
             .and_then(|v| v.to_str().ok())
             .and_then(parse_grpc_timeout)
             .map(|t| received_at + t);
-        let env =
-            RequestEnv { protocol: Protocol::Grpc, peer, received_at, inbound_deadline, route, metadata: headers };
+        let env = RequestEnv {
+            protocol: Protocol::Grpc,
+            peer,
+            received_at,
+            inbound_deadline,
+            route,
+            query: None,
+            metadata: headers,
+        };
         Box::pin(async move {
             match engine.call(&plan, Request { body, env }).instrument(span).await {
                 Ok(reply) => match reply.status {

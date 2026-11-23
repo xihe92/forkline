@@ -9,11 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use common::{plans, registry, start};
+use bytes::Bytes;
+use common::{plans, read_frame, registry, send_frame, start};
 use forkline_engine::Engine;
 use forkline_server::{Hooks, Reloader};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
     let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
@@ -226,23 +225,6 @@ async fn the_admin_allowlist_refuses_other_addresses() {
     s.stop().await;
 }
 
-async fn send_frame(stream: &mut tokio::net::TcpStream, body: &[u8]) {
-    let mut buf = BytesMut::with_capacity(4 + body.len());
-    buf.put_u32(body.len() as u32);
-    buf.put_slice(body);
-    stream.write_all(&buf).await.unwrap();
-}
-
-async fn read_frame(stream: &mut tokio::net::TcpStream) -> Option<(u8, Bytes)> {
-    let mut len = [0u8; 4];
-    stream.read_exact(&mut len).await.ok()?;
-    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    stream.read_exact(&mut body).await.ok()?;
-    let mut body = Bytes::from(body);
-    let status = body.get_u8();
-    Some((status, body))
-}
-
 #[tokio::test]
 async fn the_tcp_adapter_pipelines_in_order_and_maps_statuses() {
     let engine = Arc::new(Engine::new(registry(), &plans(&[("p", "!", 0, 1000)])).unwrap());
@@ -312,4 +294,22 @@ async fn the_drain_timeout_bounds_shutdown() {
     let res = stuck.await.unwrap().unwrap();
     assert_eq!(res.status(), 503, "the stuck request was cut off");
     assert_eq!(res.text().await.unwrap(), "shutting down");
+}
+
+#[tokio::test]
+async fn http_routes_accept_get_and_pass_the_query_string() {
+    let engine = Arc::new(Engine::new(registry(), &plans(&[("p", "-a", 0, 1000)])).unwrap());
+    let s = start("[[http]]\naddr = \"127.0.0.1:0\"\nroutes = { \"/p\" = \"p\" }\n", engine, Hooks::default()).await;
+    let client = reqwest::Client::new();
+
+    let res = client.get(s.http("/p?user=7&event=click")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.text().await.unwrap(), "user=7&event=click-a");
+
+    let res = client.post(s.http("/p?ignored=1")).body("body").send().await.unwrap();
+    assert_eq!(res.text().await.unwrap(), "body-a", "a POST body wins over the query");
+
+    let res = client.put(s.http("/p")).body("x").send().await.unwrap();
+    assert_eq!(res.status(), 405);
+    s.stop().await;
 }

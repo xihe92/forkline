@@ -207,3 +207,28 @@ async fn services_are_resolved_at_build_and_at_request_time() {
     let err = Engine::with_services(registry(), &file, wrong).unwrap_err().to_string();
     assert!(err.contains("is a `u32`, not a"), "{err}");
 }
+
+#[tokio::test]
+async fn a_reload_can_replace_the_services() {
+    let text = plan("p", 1000, r#"{ module = "Greet", config = { service = "greeting" } }"#);
+    let file = PlansFile::from_toml_str(&text).unwrap();
+    let e =
+        Engine::with_services(registry(), &file, Arc::new(ServiceRegistry::new().with("greeting", Greeting("hello"))))
+            .unwrap();
+    assert_eq!(body(&e, "p").await, (Status::Ok, "hello x (hello)".into()));
+
+    let version =
+        e.reload_with_services(&file, Arc::new(ServiceRegistry::new().with("greeting", Greeting("hi")))).unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(body(&e, "p").await, (Status::Ok, "hi x (hi)".into()), "modules were rebuilt with the new service");
+
+    // Dropping a service a plan still needs is rejected; the running snapshot stays.
+    let err = e.reload_with_services(&file, Arc::new(ServiceRegistry::new())).unwrap_err().to_string();
+    assert_eq!(err, "plan `p`, node `step`: module `Greet`: service `greeting` is not registered");
+    assert_eq!(e.snapshot().version, 2);
+    assert_eq!(body(&e, "p").await, (Status::Ok, "hi x (hi)".into()));
+
+    // A plain reload keeps the services it has.
+    assert_eq!(e.reload(&file).unwrap(), 3);
+    assert_eq!(body(&e, "p").await, (Status::Ok, "hi x (hi)".into()));
+}

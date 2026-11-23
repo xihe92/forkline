@@ -299,3 +299,33 @@ async fn late_or_long_queued_requests_are_shed_before_any_module_runs() {
     let reply = e.call("p", Request::in_process("x")).await.unwrap();
     assert_eq!(reply.status, Status::Error(ErrorKind::Module));
 }
+
+/// The same plan under another name.
+fn renamed(to: &str) -> PlansFile {
+    let text = format!(
+        "[plans.{to}]\nroot = \"decode\"\nterminal = \"error\"\nlinks = [\"decode -> a\", \"a -> b\", \"b -> encode\"]\n\
+         [plans.{to}.nodes]\ndecode = {{ module = \"BodyDecoder\" }}\na = {{ module = \"Append\" }}\n\
+         b = {{ module = \"Append\" }}\nencode = {{ module = \"TextEncoder\" }}\nerror = {{ module = \"ErrorReply\" }}\n"
+    );
+    PlansFile::from_toml_str(&text).unwrap()
+}
+
+#[tokio::test]
+async fn a_reload_or_rollback_may_not_remove_a_served_plan() {
+    let e = engine("{}", "{}");
+    // Before anything requires it, a plan may be renamed away and back.
+    assert_eq!(e.reload(&renamed("q")).unwrap(), 2);
+    assert_eq!(e.reload(&plans("{}", "{}", "{}", 100)).unwrap(), 3);
+
+    e.require_plans(["p"]);
+    let err = e.reload(&renamed("q")).unwrap_err();
+    assert_eq!(err.to_string(), "plan `p`: is served by a listener, so the new configuration must keep it");
+    assert_eq!(e.snapshot().version, 3, "the running snapshot stays");
+    assert!(e.has_plan("p"));
+
+    // Snapshot 2 (only `q`) is in the history; rolling back to it is refused.
+    assert_eq!(e.history(), vec![1, 2]);
+    assert_eq!(e.rollback(), None, "the previous snapshot lacks `p`");
+    assert_eq!(e.snapshot().version, 3);
+    assert_eq!(e.history(), vec![1, 2], "the refused snapshot stays in the history");
+}

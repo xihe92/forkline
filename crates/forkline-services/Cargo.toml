@@ -26,8 +26,10 @@ tower = { workspace = true, features = ["util", "timeout", "retry"] }
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
+tokio-stream.workspace = true
 tokio-util.workspace = true
+tonic = { workspace = true, features = ["router", "server"] }
 wiremock.workspace = true
 
 [lints]

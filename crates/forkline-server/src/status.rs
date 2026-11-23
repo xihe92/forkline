@@ -19,3 +19,25 @@ pub(crate) fn grpc_code(kind: ErrorKind) -> tonic::Code {
         _ => tonic::Code::Internal,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_kind_has_a_status() {
+        let table = [
+            (ErrorKind::BadRequest, 400, tonic::Code::InvalidArgument),
+            (ErrorKind::Module, 500, tonic::Code::Internal),
+            (ErrorKind::Deadline, 504, tonic::Code::DeadlineExceeded),
+            (ErrorKind::Cancelled, 503, tonic::Code::Cancelled),
+            (ErrorKind::Panic, 500, tonic::Code::Internal),
+            (ErrorKind::MergeConflict, 500, tonic::Code::Internal),
+            (ErrorKind::Internal, 500, tonic::Code::Internal),
+        ];
+        for (kind, http, grpc) in table {
+            assert_eq!(http_status(kind).as_u16(), http, "{kind}");
+            assert_eq!(grpc_code(kind), grpc, "{kind}");
+        }
+    }
+}

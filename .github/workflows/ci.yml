@@ -35,6 +35,23 @@ jobs:
         env:
           RUSTFLAGS: -D warnings --cfg tokio_unstable
 
+  coverage:
+    name: line coverage (at least 88%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-llvm-cov --locked
+      # Test, bench, fuzz and example sources are excluded; the examples'
+      # tests still count towards the crates they exercise.
+      - run: >
+          cargo llvm-cov --workspace --summary-only
+          --ignore-filename-regex '(tests/|benches/|fuzz/|examples/)'
+          --fail-under-lines 88
+
   msrv:
     name: minimum Rust version (1.88)
     runs-on: ubuntu-latest

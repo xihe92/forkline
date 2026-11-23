@@ -189,6 +189,22 @@ mod tests {
     }
 
     #[test]
+    fn root_and_terminal_differ_links_are_unique_and_the_budget_is_positive() {
+        let text = plan(r#""a -> b", "b -> c""#).replace("terminal = \"e\"", "terminal = \"a\"");
+        assert!(
+            check(&text).iter().any(|m| m.contains("root and terminal must be different nodes")),
+            "{:?}",
+            check(&text)
+        );
+
+        let e = check(&plan(r#""a -> b", "a -> b", "b -> c""#));
+        assert!(e.iter().any(|m| m.contains("link `a -> b` is listed twice")), "{e:?}");
+
+        let text = plan(r#""a -> b", "b -> c""#).replace("links =", "time_budget_ms = 0\nlinks =");
+        assert!(check(&text).iter().any(|m| m.contains("time_budget_ms must be greater than 0")), "{:?}", check(&text));
+    }
+
+    #[test]
     fn a_chain_is_clean() {
         assert_eq!(check(&plan(r#""a -> b", "b -> c""#)), Vec::<String>::new());
     }

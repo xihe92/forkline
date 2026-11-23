@@ -3,8 +3,8 @@
 
 use bytes::Bytes;
 use forkline_core::{
-    Build, BuildError, Ctx, Decode, Encode, Join, JoinStep, Module, NoConfig, NodeError, PlanError, Registry, Reply,
-    Terminal,
+    Branch, Build, BuildError, Ctx, Decode, Empty, Encode, Join, JoinStep, Module, NoConfig, NodeError, PlanError,
+    Registry, Reply, Terminal,
 };
 use forkline_macros::interface;
 use forkline_plan::{PlansFile, compile, compile_all};
@@ -138,9 +138,24 @@ impl Join for J {
     }
 }
 
+struct Pick;
+impl Build for Pick {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Branch for Pick {
+    type Io<'a> = Empty<'a>;
+    fn choose(&self, _: &Ctx, _: Empty<'_>) -> Result<&'static str, NodeError> {
+        Ok("x")
+    }
+}
+
 fn registry() -> Registry {
     Registry::builder()
         .decode::<Dec>("Dec")
+        .branch::<Pick>("Pick")
         .module::<Work>("Work")
         .module::<Number>("Number")
         .join::<J>("J")
@@ -393,4 +408,54 @@ fn a_join_sees_the_union_of_its_paths() {
         "w = { module = \"Work\" }\nr0 = { module = \"Clear\" }\nj = { module = \"J\" }",
     );
     assert!(e.is_empty(), "{e:?}");
+}
+
+fn assert_reported(text: &str, needle: &str) {
+    let e = errors(text);
+    assert!(e.iter().any(|m| m.contains(needle)), "expected {needle:?} in {e:?}");
+}
+
+#[test]
+fn each_module_kind_must_sit_where_the_plan_allows_it() {
+    let work = r#"work   = { module = "Work", config = { suffix = "!" } }"#;
+    assert_reported(
+        &CHAIN.replace(work, r#"work = { module = "Dec" }"#),
+        "node `work`: a decode module can only be the root",
+    );
+    assert_reported(
+        &CHAIN.replace(work, r#"work = { module = "Err" }"#),
+        "node `work`: a terminal module can only be the plan's terminal",
+    );
+    assert_reported(
+        &CHAIN.replace(r#"error  = { module = "Err" }"#, r#"error = { module = "Work" }"#),
+        "node `error`: the terminal must be a terminal module, `Work` is a module",
+    );
+    assert_reported(
+        &CHAIN.replace(r#"encode = { module = "Enc" }"#, r#"encode = { module = "Work" }"#),
+        "plan `echo`: the plan has no encode node",
+    );
+}
+
+#[test]
+fn labelled_links_belong_to_branches_and_branches_need_labels() {
+    assert_reported(
+        &CHAIN.replace(r#""decode -> work""#, r#""decode -> work : x""#),
+        "node `decode`: has labelled links, so it must be a branch or multibranch module, `Dec` is a decode",
+    );
+    let work = r#"work   = { module = "Work", config = { suffix = "!" } }"#;
+    assert_reported(
+        &CHAIN.replace(work, r#"work = { module = "Pick" }"#),
+        "node `work`: links out of a branch must carry labels",
+    );
+    // A branch at the end of a detached path has nowhere to go.
+    let text = CHAIN
+        .replace(r#""work -> encode""#, r#""work -> encode", "decode -> pick""#)
+        .replace(r#"error  = { module = "Err" }"#, "error = { module = \"Err\" }\npick = { module = \"Pick\" }");
+    assert_reported(&text, "node `pick`: a branch needs at least one labelled link");
+}
+
+#[test]
+fn plans_files_that_cannot_be_read_name_the_path() {
+    let err = PlansFile::load("/nonexistent/plans.toml").unwrap_err().to_string();
+    assert!(err.contains("/nonexistent/plans.toml"), "{err}");
 }

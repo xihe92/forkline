@@ -107,6 +107,7 @@ async fn handle(conn: Conn, peer: SocketAddr, body: Bytes) -> Bytes {
         received_at,
         inbound_deadline: None,
         route: conn.plan.to_string(),
+        query: None,
         metadata: HeaderMap::new(),
     };
     let Some(result) = conn.gate.guard(conn.engine.call(&conn.plan, Request { body, env })).await else {

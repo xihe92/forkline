@@ -242,6 +242,15 @@ drain_timeout_ms = 10000
 | `POST /admin/rollback` | Swap back to the previous snapshot |
 
 `SIGHUP` also reloads. A failed reload leaves the running snapshot in place.
+A reload (or rollback) that would remove a plan a listener serves is rejected,
+so a route can never point at a missing plan.
+
+HTTP request bodies are limited to `max_body_bytes` per listener (default
+2 MiB; larger bodies get 413), TCP frames to `max_frame_bytes`.
+
+A failure after the request's deadline has passed is reported as a deadline
+(HTTP 504, gRPC `DEADLINE_EXCEEDED`, TCP status 3), even when the module saw it
+as its own error, for example a service call cut off by the same deadline.
 Requests refused by admission control get HTTP 503 (with `Retry-After`),
 gRPC `RESOURCE_EXHAUSTED` or TCP status 4 at once, instead of queueing.
 
@@ -260,7 +269,9 @@ Metrics: `forkline_requests_total{plan,outcome}`,
 `forkline_reloads_total{result}`, `forkline_snapshot_version`.
 
 Inbound `traceparent` and `tracestate` headers are forwarded on every
-outbound HTTP and gRPC call.
+outbound HTTP and gRPC call. Outbound gRPC calls also carry `grpc-timeout`
+set to the time left before the request's deadline, measured again for each
+retry, so the backend stops work the caller has given up on.
 
 ## Benchmarks
 

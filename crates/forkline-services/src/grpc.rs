@@ -10,6 +10,7 @@ use bytes::{Buf, BufMut, Bytes};
 use forkline_core::Ctx;
 use forkline_core::node::BoxFuture;
 use serde::Deserialize;
+use tokio::time::Instant;
 use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tower::util::BoxCloneSyncService;
 use tower::{Service, ServiceExt};
@@ -66,6 +67,10 @@ pub struct GrpcRequest {
     pub body: Bytes,
     /// Request metadata.
     pub metadata: http::HeaderMap,
+    /// The calling request's deadline. The tonic transport sends the time
+    /// left as `grpc-timeout` on each attempt, so the backend can stop work
+    /// the caller has given up on.
+    pub deadline: Option<Instant>,
 }
 
 /// Settings for `kind = "grpc"`.
@@ -124,7 +129,25 @@ impl Service<GrpcRequest> for TonicTransport {
             grpc.ready().await.map_err(|e| ServiceError::new(ServiceErrorKind::Transport, e.to_string()))?;
             let mut request = tonic::Request::new(req.body);
             *request.metadata_mut() = tonic::metadata::MetadataMap::from_headers(req.metadata);
-            grpc.unary(request, path, BytesCodec).await.map(tonic::Response::into_inner).map_err(|s| from_status(&s))
+            // Measured per attempt, after waiting for the channel, so a
+            // retry sends what is left rather than the original budget.
+            if let Some(deadline) = req.deadline {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(ServiceError::new(ServiceErrorKind::Deadline, "request deadline passed"));
+                }
+                request.set_timeout(left);
+            }
+            let result = grpc.unary(request, path, BytesCodec).await.map(tonic::Response::into_inner);
+            result.map_err(|status| match req.deadline {
+                // The backend saw our grpc-timeout and gave up (tonic answers
+                // CANCELLED, others DEADLINE_EXCEEDED): that is our deadline.
+                Some(deadline) if Instant::now() >= deadline => ServiceError::new(
+                    ServiceErrorKind::Deadline,
+                    format!("request deadline passed ({:?}: {})", status.code(), status.message()),
+                ),
+                _ => from_status(&status),
+            })
         })
     }
 }
@@ -166,11 +189,12 @@ impl GrpcClient {
     }
 
     /// Call `path` with `body`, bounded by the request's deadline and
-    /// cancellation. The inbound `traceparent` and `tracestate` are forwarded.
+    /// cancellation. The inbound `traceparent` and `tracestate` are forwarded,
+    /// and the time left before the deadline is sent as `grpc-timeout`.
     pub async fn call(&self, cx: &Ctx, path: impl Into<String>, body: impl Into<Bytes>) -> Result<Bytes, ServiceError> {
         let mut metadata = http::HeaderMap::new();
         crate::trace::forward(cx, &mut metadata);
-        let req = GrpcRequest { path: path.into(), body: body.into(), metadata };
+        let req = GrpcRequest { path: path.into(), body: body.into(), metadata, deadline: Some(cx.deadline()) };
         let started = std::time::Instant::now();
         let call = tokio::time::timeout_at(cx.deadline(), self.svc.clone().oneshot(req));
         let result = tokio::select! {

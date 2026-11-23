@@ -65,6 +65,9 @@ pub struct RequestEnv {
     pub inbound_deadline: Option<Instant>,
     /// Route, method or path the request was addressed to.
     pub route: String,
+    /// Raw query string of an HTTP request (`a=1&b=2`, without the `?`), if
+    /// the URL had one. Other protocols leave it `None`.
+    pub query: Option<String>,
     /// Inbound headers or gRPC metadata.
     pub metadata: HeaderMap,
 }
@@ -78,6 +81,7 @@ impl RequestEnv {
             received_at: Instant::now(),
             inbound_deadline: None,
             route: String::new(),
+            query: None,
             metadata: HeaderMap::new(),
         }
     }

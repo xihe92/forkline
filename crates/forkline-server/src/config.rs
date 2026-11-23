@@ -6,7 +6,8 @@
 //!
 //! [[http]]
 //! addr = "0.0.0.0:8080"
-//! routes = { "/echo" = "echo" }   # POST /echo runs plan `echo`
+//! routes = { "/echo" = "echo" }   # GET or POST /echo runs plan `echo`
+//! max_body_bytes = 2097152        # larger bodies get 413 (default 2 MiB)
 //!
 //! [[grpc]]
 //! addr = "0.0.0.0:50051"
@@ -189,8 +190,18 @@ pub struct RuntimeConfig {
 pub struct HttpListener {
     /// Address to bind.
     pub addr: SocketAddr,
-    /// Path to plan name. Each path accepts POST.
+    /// Path to plan name. Each path accepts GET and POST.
     pub routes: BTreeMap<String, String>,
+    /// Largest accepted request body; a larger one gets 413 (default 2 MiB).
+    #[serde(default = "default_max_body")]
+    pub max_body_bytes: usize,
+}
+
+/// Default request body limit for HTTP listeners: 2 MiB.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 2 << 20;
+
+fn default_max_body() -> usize {
+    DEFAULT_MAX_BODY_BYTES
 }
 
 /// One gRPC listener serving `forkline.v1.Plans`.
@@ -265,6 +276,14 @@ impl ServerConfig {
         Self::from_toml_str(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// Every plan a route, method or TCP listener serves.
+    pub fn served_plans(&self) -> std::collections::BTreeSet<String> {
+        let http = self.http.iter().flat_map(|l| l.routes.values());
+        let grpc = self.grpc.iter().flat_map(|l| l.methods.values());
+        let tcp = self.tcp.iter().map(|l| &l.plan);
+        http.chain(grpc).chain(tcp).cloned().collect()
+    }
+
     /// Check that every route and method names a loaded plan.
     pub fn validate(&self, engine: &Engine) -> Result<(), String> {
         let mut problems = Vec::new();
@@ -290,6 +309,9 @@ impl ServerConfig {
             }
         }
         for l in &self.http {
+            if l.max_body_bytes == 0 {
+                problems.push(format!("http {}: max_body_bytes must be > 0", l.addr));
+            }
             for (path, plan) in &l.routes {
                 if !path.starts_with('/') {
                     problems.push(format!("http {}: route `{path}` must start with `/`", l.addr));

@@ -112,7 +112,12 @@ async fn reload(State(state): State<AdminState>) -> Response {
 async fn rollback(State(state): State<AdminState>) -> Response {
     match state.engine.rollback() {
         Some(version) => axum::Json(json!({ "version": version })).into_response(),
-        None => (StatusCode::CONFLICT, axum::Json(json!({ "error": "no earlier snapshot to roll back to" })))
+        None => (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": "nothing to roll back to: no earlier snapshot, or it lacks a plan a listener serves"
+            })),
+        )
             .into_response(),
     }
 }
