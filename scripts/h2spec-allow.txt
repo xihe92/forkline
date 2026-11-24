@@ -1,0 +1,32 @@
+# h2spec failures that are expected, one per line: <listener> <package> | <test>.
+# scripts/h2spec-check.sh fails on any failure not listed here, and reports
+# listed ones that pass (remove those lines), except lines marked `flaky`,
+# which fail only sometimes.
+
+# The h2 crate closes the connection at once on an invalid preface, so the
+# client sees a reset rather than a GOAWAY frame. The connection is still
+# terminated, which is what RFC 9113 3.4 requires.
+http http2/3.5 | Sends invalid connection preface
+grpc http2/3.5 | Sends invalid connection preface
+
+# The client sends GOAWAY and then a PING. h2 closes the connection on the
+# GOAWAY, sometimes before reading the PING, and closing a socket with unread
+# data resets it: the connection ends either way, but h2spec expects a
+# clean close or a PING reply. In 15 local runs: 3.8 failed 10 to 11 times
+# per listener, 7 four times on gRPC; both listeners share this code.
+flaky http generic/3.8 | Sends a GOAWAY frame
+flaky grpc generic/3.8 | Sends a GOAWAY frame
+flaky http http2/7 | Sends a GOAWAY frame with unknown error code
+flaky grpc http2/7 | Sends a GOAWAY frame with unknown error code
+
+# h2spec sends a request without a body and expects a DATA frame back. A gRPC
+# request without a message is an error, which gRPC answers trailers-only:
+# one HEADERS frame and no DATA. The WINDOW_UPDATE and PRIORITY frames under
+# test are accepted.
+grpc generic/2 | Sends a WINDOW_UPDATE frame on half-closed (remote) stream
+grpc generic/2 | Sends a PRIORITY frame on half-closed (remote) stream
+
+# The gRPC service answers each of these body-less requests at once and
+# closes the stream, so h2spec's extra stream never exceeds the concurrency
+# limit. The HTTP listener, with the same HTTP/2 settings, passes this test.
+grpc http2/5.1.2 | Sends HEADERS frames that causes their advertised concurrent stream limit to be exceeded

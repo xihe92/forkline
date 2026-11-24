@@ -120,6 +120,15 @@ see "Before 1.0.0" for what remains.
   with well-formed HTTP/1 or HTTP/2, and leaves no task behind. Each target
   now fuzzes for 30 minutes nightly; the corpus is kept between runs and
   pull requests' 60-second run starts from it.
+- HTTP/2 conformance: `scripts/h2spec-check.sh` runs h2spec 2.6.0 against
+  the echo example's HTTP listener (h2c) and gRPC listener, nightly. Of 146
+  tests per listener, HTTP passes all but one and gRPC all but four, none a
+  Forkline defect: an invalid preface ends in a reset rather than a GOAWAY
+  (both), gRPC answers body-less requests trailers-only where h2spec expects
+  a DATA frame (two tests), and the concurrency test never exceeds the limit
+  because gRPC closes each stream at once. A reset-versus-close race after a
+  client's GOAWAY fails two more tests now and then. Each is listed with its
+  reason in `scripts/h2spec-allow.txt`; any other failure fails the job.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

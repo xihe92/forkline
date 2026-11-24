@@ -130,3 +130,19 @@ jobs:
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}/
+
+  # HTTP/2 conformance (h2spec) on the HTTP listener over h2c and on the gRPC
+  # listener; fails on any failure not in scripts/h2spec-allow.txt.
+  h2spec:
+    name: HTTP/2 conformance (h2spec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/h2spec-check.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: h2spec
+          path: target/h2spec/

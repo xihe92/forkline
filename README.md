@@ -462,7 +462,11 @@ see `.config/nextest.toml`), builds every feature and runs a short fuzz pass.
 A nightly job benchmarks `main` against the commit the previous nightly run
 tested, in the same job, and fails on a regression over 10%
 (`scripts/bench-check.py`) or a p99 over 50 µs for the 7-node fork/join plan
-(`cargo bench -p forkline-engine --bench latency`).
+(`cargo bench -p forkline-engine --bench latency`). Nightly also: every fuzz
+target for 30 minutes (`fuzz/README.md`), `scripts/blocking-check.sh`, and
+HTTP/2 conformance with [h2spec](https://github.com/summerwind/h2spec) on the
+HTTP (h2c) and gRPC listeners (`scripts/h2spec-check.sh`; expected failures,
+each with its reason, are in `scripts/h2spec-allow.txt`).
 
 ## Licence
 
