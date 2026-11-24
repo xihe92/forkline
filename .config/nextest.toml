@@ -1,0 +1,20 @@
+# cargo-nextest settings. Each test runs in its own process, so per-process
+# state (open file descriptors, global metrics) belongs to one test only.
+#
+#   cargo nextest run --workspace              # local
+#   cargo nextest run --workspace --profile ci # CI: also writes a JUnit report
+#
+# Doc tests still run with `cargo test --workspace --doc`.
+
+[profile.default]
+# Warn about a test still running after 60 s, and kill it after 3 periods
+# (3 minutes), naming it, instead of letting a hung test stall the whole run.
+slow-timeout = { period = "60s", terminate-after = 3 }
+# No automatic retries: a flaky test should fail visibly and get fixed.
+retries = 0
+# Report every failure in one run.
+fail-fast = false
+
+[profile.ci]
+# Written to target/nextest/ci/junit.xml and uploaded when the job fails.
+junit = { path = "junit.xml" }

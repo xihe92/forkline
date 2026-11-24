@@ -395,15 +395,21 @@ before 1.0.0.
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo nextest run --workspace              # or: cargo test --workspace
+cargo test --workspace --doc
 cargo deny check
 cd fuzz && cargo +nightly fuzz run plans   # see fuzz/README.md
 ```
 
-The minimum supported Rust version is 1.88. Every crate forbids `unsafe` code,
-and library code may not `unwrap`, `expect` or `panic`. CI also builds every
-feature, runs a short fuzz pass, and fails a pull request whose benchmarks
-regress by more than 10% (`scripts/bench-check.py`).
+The minimum supported Rust version is 1.88, and CI runs on Linux. Every crate
+forbids `unsafe` code, and library code may not `unwrap`, `expect` or `panic`.
+CI runs the tests with [cargo-nextest](https://nexte.st) (one process per
+test; a test still running after 3 minutes is killed and named; no retries,
+see `.config/nextest.toml`), builds every feature and runs a short fuzz pass.
+A nightly job benchmarks `main` against the commit the previous nightly run
+tested, in the same job, and fails on a regression over 10%
+(`scripts/bench-check.py`) or a p99 over 50 µs for the 7-node fork/join plan
+(`cargo bench -p forkline-engine --bench latency`).
 
 ## Licence
 

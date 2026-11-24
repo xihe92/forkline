@@ -1,0 +1,75 @@
+name: Nightly
+
+# Slow or noisy checks that don't run on pull requests. GitHub notifies the
+# repository owner when a scheduled run fails.
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The commit the last successful nightly run tested. Empty when main
+  # hasn't changed since, so the benchmark job is skipped.
+  base:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=$(gh run list --workflow nightly.yml --branch main --status success --limit 1 \
+            --json headSha --jq '.[0].headSha // empty')
+          if [ -z "$base" ]; then
+            base=$(git rev-parse HEAD~1)
+            echo "No earlier successful nightly run; comparing with the previous commit $base."
+          fi
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then
+            echo "main is unchanged since the last nightly run ($base); skipping the benchmarks."
+            base=""
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
+  # Both revisions run back to back in this job, on the same machine, so the
+  # comparison doesn't depend on which runner each night got.
+  bench:
+    name: benchmark regression (max 10%) and latency limit
+    needs: base
+    if: needs.base.outputs.sha != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: baseline at the last nightly's commit
+        run: |
+          git checkout ${{ needs.base.outputs.sha }}
+          cargo bench -p forkline-engine --bench engine -- --save-baseline base
+          git checkout ${{ github.sha }}
+      - name: main against the baseline
+        run: cargo bench -p forkline-engine --bench engine -- --baseline base
+      # Shared runners are noisy: one rerun before a regression fails the job.
+      - name: fail on a regression over 10%
+        run: |
+          python3 scripts/bench-check.py 10 || {
+            echo "Rerunning once to rule out noise."
+            cargo bench -p forkline-engine --bench engine -- --baseline base
+            python3 scripts/bench-check.py 10
+          }
+      - name: p99 under 50 µs for the 7-node fork/join plan
+        run: cargo bench -p forkline-engine --bench latency

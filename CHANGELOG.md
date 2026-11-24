@@ -123,6 +123,16 @@ see "Before 1.0.0" for what remains.
   HTTP 502/504 retried and 500 not, gRPC status mapping, deadline,
   cancellation and connection failures, `services.toml` shape errors.
 - CI fails below 88% line coverage (90% today, up from 81%).
+- Tests run with cargo-nextest (`.config/nextest.toml`): one process per
+  test, a warning after 60 s and a kill after 3 minutes that names the hung
+  test, no retries, and a JUnit report kept when the CI job fails. Doc tests
+  still run with `cargo test --doc`. CI is Linux only.
+- The benchmark gate moved from pull requests to a nightly workflow
+  (`.github/workflows/nightly.yml`), which benchmarks `main` against the
+  commit the previous successful nightly run tested, back to back in one job,
+  reruns once before failing on a regression over 10%, and skips when `main`
+  hasn't changed. Pull requests still check that the benchmarks build. The
+  latency run now fails when the 7-node fork/join plan's p99 is over 50 µs.
 
 ### Before 1.0.0
 - Choose a licence (plan decision 8) and set `license` and `publish`.
