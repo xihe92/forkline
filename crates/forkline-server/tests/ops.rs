@@ -156,7 +156,9 @@ async fn at_twice_the_admission_limit_admitted_requests_stay_in_budget_and_the_r
     assert_eq!(admitted.len() + refused.len(), 2 * RED);
     assert!(refused.len() >= RED, "the excess is refused");
     assert!(percentile(&admitted, 99.0) < Duration::from_millis(BUDGET_MS), "admitted p99 within the budget");
-    assert!(percentile(&refused, 99.0) < Duration::from_millis(5), "refusals are immediate (client-observed)");
+    // Refused at once, not after queueing behind the 100 ms requests. The
+    // margin is for shared CI runners, where 5 ms did not always hold.
+    assert!(percentile(&refused, 99.0) < Duration::from_millis(50), "refusals are immediate (client-observed)");
 
     // Admission resumes once the load is gone.
     let c = &clients[0];

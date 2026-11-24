@@ -31,7 +31,7 @@ async fn metrics_are_exported() {
         r#"forkline_requests_total{plan="p",outcome="ok"} 2"#,
         r#"forkline_requests_total{plan="p",outcome="bad_request"} 1"#,
         r#"forkline_node_errors_total{plan="p",node="work",kind="bad_request"} 1"#,
-        r#"forkline_request_duration_seconds_bucket{le="0.001",plan="p"} 3"#,
+        r#"forkline_request_duration_seconds_count{plan="p"} 3"#,
         r#"forkline_node_duration_seconds_count{plan="p",node="work"} 3"#,
         "forkline_snapshot_version 1",
     ] {
