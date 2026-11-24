@@ -1,0 +1,10 @@
+[[http]]
+addr = "127.0.0.1:8081"
+routes = { "/publish" = "publish", "/stats" = "stats" }
+
+[admin]
+addr = "127.0.0.1:9181"
+
+[telemetry]
+log_format = "text"
+filter = "warn"

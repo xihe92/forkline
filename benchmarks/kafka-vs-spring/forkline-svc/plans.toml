@@ -1,0 +1,23 @@
+[plans.publish]
+root = "parse"
+terminal = "error"
+time_budget_ms = 3000
+links = ["parse -> publish", "publish -> reply"]
+
+[plans.publish.nodes]
+parse   = { module = "QueryDecoder" }
+publish = { module = "Publish", config = { service = "kafka", topic = "events" } }
+reply   = { module = "JsonReply" }
+error   = { module = "ErrorReply" }
+
+# Publish counts, for the benchmark's drain measurement.
+[plans.stats]
+root = "read"
+terminal = "error"
+time_budget_ms = 1000
+links = ["read -> reply"]
+
+[plans.stats.nodes]
+read  = { module = "StatsDecoder", config = { service = "kafka" } }
+reply = { module = "StatsReply" }
+error = { module = "ErrorReply" }

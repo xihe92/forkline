@@ -66,6 +66,11 @@ see "Before 1.0.0" for what remains.
 - Outbound gRPC calls send `grpc-timeout` with the time left before the
   request's deadline, computed again on each retry. `GrpcRequest` has a new
   `deadline` field, so code that builds one must set it.
+- `benchmarks/kafka-vs-spring`: the same Kafka-publishing GET service in
+  Forkline and Spring MVC, with a runner that compares CPU, memory, latency
+  and throughput, both waiting for Kafka's acknowledgement and fire and
+  forget (`--mode async`, which also times the backlog's drain). A manual
+  run, before each release; CI doesn't build it.
 - `App::check_files` runs every check `serve` runs at startup without
   serving, inside or outside a Tokio runtime, and `App::assert_files_valid`
   turns it into a test assertion, so a broken plan fails `cargo test`. The
