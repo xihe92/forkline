@@ -120,10 +120,12 @@ async fn server_config_problems_are_reported_together() {
         [[grpc]]
         addr = "127.0.0.1:0"
         methods = { "a/b" = "p", "" = "p", Ghost = "ghost" }
+        idle_timeout_ms = 0
         [[tcp]]
         addr = "127.0.0.1:0"
         plan = "ghost"
         max_frame_bytes = 0
+        idle_timeout_ms = 0
         [admin]
         addr = "127.0.0.1:0"
         allow = ["10.0.0.0/33", "not-an-ip"]
@@ -142,6 +144,7 @@ async fn server_config_problems_are_reported_together() {
     let expected = [
         "tcp 127.0.0.1:0: unknown plan `ghost`",
         "tcp 127.0.0.1:0: max_frame_bytes and max_in_flight_per_connection must be > 0",
+        "tcp 127.0.0.1:0: idle_timeout_ms must be > 0",
         "admission: need 0 < green < red (green = 5, red = 5)",
         "admin: `10.0.0.0/33` is not an IP address or network",
         "admin: `not-an-ip` is not an IP address or network",
@@ -149,6 +152,7 @@ async fn server_config_problems_are_reported_together() {
         "http 127.0.0.1:0: header_read_timeout_ms and idle_timeout_ms must be > 0",
         "http 127.0.0.1:0: route `/ghost` names unknown plan `ghost`",
         "http 127.0.0.1:0: route `no-slash` must start with `/`",
+        "grpc 127.0.0.1:0: idle_timeout_ms must be > 0",
         "grpc 127.0.0.1:0: `` is not a valid method name",
         "grpc 127.0.0.1:0: method `Ghost` names unknown plan `ghost`",
         "grpc 127.0.0.1:0: `a/b` is not a valid method name",

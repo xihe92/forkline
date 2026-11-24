@@ -39,7 +39,6 @@ use prometheus_client::registry::Registry as MetricsRegistry;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 
 pub use admin::Reloader;
@@ -109,7 +108,7 @@ impl std::fmt::Debug for Hooks {
 #[derive(Debug)]
 pub struct BoundServer {
     http: Vec<(TcpListener, axum::Router, http_serve::Timeouts)>,
-    grpc: Vec<(TcpListener, grpc::GrpcPlans)>,
+    grpc: Vec<(TcpListener, grpc::GrpcPlans, http_serve::Timeouts)>,
     tcp: Vec<(TcpListener, TcpListenerConfig, Gate)>,
     admin: Option<(TcpListener, axum::Router)>,
     bound: Vec<Bound>,
@@ -162,7 +161,11 @@ impl BoundServer {
             let addr = local_addr(&tcp, listener.addr)?;
             server.bound.push(Bound::Grpc(addr));
             let gate = Gate::new(admission.clone(), format!("grpc:{addr}"), hard_stop.clone());
-            server.grpc.push((tcp, grpc::GrpcPlans::gated(engine.clone(), &listener.methods, gate)));
+            server.grpc.push((
+                tcp,
+                grpc::GrpcPlans::gated(engine.clone(), &listener.methods, gate),
+                listener.timeouts(),
+            ));
         }
         for listener in &config.tcp {
             let tcp = bind(listener.addr).await?;
@@ -205,18 +208,15 @@ impl BoundServer {
         for (tcp, router, timeouts) in self.http {
             let stop = shutdown.clone();
             listeners.spawn(async move {
-                http_serve::serve(tcp, router, timeouts, stop).await;
+                http_serve::serve(tcp, router, http_serve::Versions::Both, timeouts, stop).await;
                 Ok(())
             });
         }
-        for (tcp, plans) in self.grpc {
+        for (tcp, plans, timeouts) in self.grpc {
             let stop = shutdown.clone();
             listeners.spawn(async move {
-                tonic::transport::Server::builder()
-                    .add_service(plans)
-                    .serve_with_incoming_shutdown(TcpListenerStream::new(tcp), stop.cancelled_owned())
-                    .await
-                    .map_err(|e| ServerError::Serve { listener: "grpc", message: e.to_string() })
+                http_serve::serve(tcp, plans, http_serve::Versions::Http2, timeouts, stop).await;
+                Ok(())
             });
         }
         for (tcp, config, gate) in self.tcp {
@@ -230,7 +230,7 @@ impl BoundServer {
         let admin_stop = CancellationToken::new();
         let admin_task = self.admin.map(|(tcp, router)| {
             let stop = admin_stop.clone();
-            tokio::spawn(http_serve::serve(tcp, router, ADMIN_TIMEOUTS, stop))
+            tokio::spawn(http_serve::serve(tcp, router, http_serve::Versions::Both, ADMIN_TIMEOUTS, stop))
         });
 
         // Serve until asked to stop, or until a listener fails.

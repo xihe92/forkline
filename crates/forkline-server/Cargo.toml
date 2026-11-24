@@ -38,7 +38,6 @@ tikv-jemallocator = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "macros", "time"] }
-tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 toml.workspace = true
 tonic = { workspace = true, features = ["transport", "router", "server"] }

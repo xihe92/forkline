@@ -91,6 +91,14 @@ see "Before 1.0.0" for what remains.
   and a client could hold a connection forever by sending nothing. The HTTP
   and admin listeners now run on Forkline's own accept loop (hyper-util),
   which also closes every connection when the drain cut-off aborts it.
+- gRPC and TCP listeners take `idle_timeout_ms` (default 60 s) too. Neither
+  closed idle connections before: tonic's server has no idle timeout, and a
+  gRPC client that never sent the HTTP/2 preface, or a TCP client that sent
+  nothing or trickled a frame, held its connection forever (found by the
+  listener contract suite). The gRPC listener now runs on the same accept
+  loop as HTTP, HTTP/2 only; tonic still decodes the calls. A connection
+  asked to close that hasn't a second later with nothing in flight is
+  dropped, so a silent client can't hold up shutdown either.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

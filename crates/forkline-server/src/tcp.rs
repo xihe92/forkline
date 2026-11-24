@@ -14,10 +14,13 @@
 //! | 4 | overloaded: refused by admission control or shed |
 //!
 //! A frame larger than `max_frame_bytes` ends the connection after the
-//! responses already owed are sent.
+//! responses already owed are sent. So does `idle_timeout_ms` with no request
+//! in flight and no complete frame received; a client that trickles a frame
+//! one byte at a time is idle.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use forkline_core::{ErrorKind, Protocol, RequestEnv, Status};
@@ -53,6 +56,7 @@ struct Conn {
     plan: Arc<str>,
     max_frame: usize,
     max_in_flight: usize,
+    idle: Duration,
 }
 
 /// Accept connections until `shutdown`, then wait for open connections to
@@ -70,6 +74,7 @@ pub(crate) async fn serve(
         plan: Arc::from(config.plan.as_str()),
         max_frame: config.max_frame_bytes,
         max_in_flight: config.max_in_flight_per_connection,
+        idle: Duration::from_millis(config.idle_timeout_ms),
     };
     let connections = TaskTracker::new();
     loop {
@@ -143,6 +148,9 @@ where
     let (mut sink, mut frames) = Framed::new(stream, codec).split();
     let mut pending = FuturesOrdered::new();
     let mut reading = true;
+    // Idle since the last complete frame or the last response sent.
+    let idle = tokio::time::sleep(conn.idle);
+    tokio::pin!(idle);
     loop {
         if !reading && pending.is_empty() {
             break;
@@ -154,9 +162,13 @@ where
                     tracing::debug!(%peer, error = %e, "tcp write failed");
                     return;
                 }
+                idle.as_mut().reset(Instant::now() + conn.idle);
             }
             next = frames.next(), if reading && pending.len() < conn.max_in_flight => match next {
-                Some(Ok(body)) => pending.push_back(handle(conn.clone(), peer, body.freeze())),
+                Some(Ok(body)) => {
+                    pending.push_back(handle(conn.clone(), peer, body.freeze()));
+                    idle.as_mut().reset(Instant::now() + conn.idle);
+                }
                 Some(Err(e)) => {
                     tracing::debug!(%peer, error = %e, "tcp frame rejected; closing after owed responses");
                     reading = false;
@@ -164,6 +176,10 @@ where
                 None => reading = false,
             },
             () = shutdown.cancelled(), if reading => reading = false,
+            () = idle.as_mut(), if reading && pending.is_empty() => {
+                tracing::debug!(%peer, "closing an idle tcp connection");
+                reading = false;
+            }
             else => break,
         }
     }
@@ -183,6 +199,7 @@ where
         plan: Arc::from(plan),
         max_frame,
         max_in_flight,
+        idle: Duration::from_millis(crate::config::DEFAULT_HTTP_TIMEOUT_MS),
     };
     let peer = SocketAddr::from(([127, 0, 0, 1], 0));
     connection(stream, peer, conn, CancellationToken::new()).await;

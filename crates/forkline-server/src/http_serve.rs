@@ -1,16 +1,18 @@
-//! The accept loop for the HTTP and admin listeners: HTTP/1.1 and HTTP/2
-//! without TLS (h2c), with a header-read timeout, an idle timeout and
-//! graceful shutdown.
+//! The accept loop for the HTTP, gRPC and admin listeners: HTTP/1.1 and
+//! HTTP/2 without TLS (h2c), or HTTP/2 only for gRPC, with a header-read
+//! timeout, an idle timeout and graceful shutdown.
 //!
-//! `axum::serve` sets neither timeout (hyper's header-read timeout needs a
-//! timer it doesn't configure), so a client could hold a connection open
-//! forever by sending nothing, or one byte at a time.
+//! Neither `axum::serve` nor tonic's server closes idle connections, and
+//! `axum::serve` sets no header-read timeout (hyper's needs a timer it
+//! doesn't configure), so a client could hold a connection open forever by
+//! sending nothing, or one byte at a time.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use axum::Router;
 use axum::extract::ConnectInfo;
+use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
@@ -33,12 +35,40 @@ pub(crate) struct Timeouts {
     pub idle: Duration,
 }
 
-/// Serve `router` until `shutdown`; then stop accepting, close idle
+/// Which HTTP versions a listener speaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Versions {
+    /// HTTP/1.1 and HTTP/2 with prior knowledge (h2c).
+    Both,
+    /// HTTP/2 only (gRPC).
+    Http2,
+}
+
+/// Serve `service` until `shutdown`; then stop accepting, close idle
 /// connections, and wait for the others to finish their requests. Dropping
 /// the future (the server's cut-off) closes every connection at once.
-pub(crate) async fn serve(listener: TcpListener, router: Router, timeouts: Timeouts, shutdown: CancellationToken) {
+/// Requests carry the peer address as axum's `ConnectInfo<SocketAddr>` and
+/// as tonic's `TcpConnectInfo`.
+pub(crate) async fn serve<S, B>(
+    listener: TcpListener,
+    service: S,
+    versions: Versions,
+    timeouts: Timeouts,
+    shutdown: CancellationToken,
+) where
+    S: tower::Service<http::Request<Incoming>, Response = http::Response<B>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder.http1().timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
+    // A timer for HTTP/2 too: hyper needs one for any HTTP/2 timeout.
+    builder.http2().timer(TokioTimer::new());
+    let builder = if versions == Versions::Http2 { builder.http2_only() } else { builder };
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -47,8 +77,8 @@ pub(crate) async fn serve(listener: TcpListener, router: Router, timeouts: Timeo
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
                     let _ = stream.set_nodelay(true);
-                    let (builder, router, stop) = (builder.clone(), router.clone(), shutdown.clone());
-                    connections.spawn(connection(builder, stream, peer, router, timeouts.idle, stop));
+                    let (builder, service, stop) = (builder.clone(), service.clone(), shutdown.clone());
+                    connections.spawn(connection(builder, stream, peer, service, timeouts.idle, stop));
                 }
                 Err(e) => accept_failed(&e).await,
             },
@@ -68,29 +98,45 @@ async fn accept_failed(e: &std::io::Error) {
     }
 }
 
-async fn connection(
+async fn connection<S, B>(
     builder: auto::Builder<TokioExecutor>,
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
-    router: Router,
+    inner: S,
     idle: Duration,
     shutdown: CancellationToken,
-) {
+) where
+    S: tower::Service<http::Request<Incoming>, Response = http::Response<B>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let tcp_info =
+        tonic::transport::server::TcpConnectInfo { local_addr: stream.local_addr().ok(), remote_addr: Some(peer) };
     // How many requests are in flight on this connection, and since when.
     let (activity, mut watch) = watch::channel((0usize, Instant::now()));
     let service = tower::service_fn(move |mut request: http::Request<Incoming>| {
         request.extensions_mut().insert(ConnectInfo(peer));
+        request.extensions_mut().insert(tcp_info.clone());
         let busy = Busy::start(&activity);
-        let router = router.clone();
+        let inner = inner.clone();
         async move {
-            let response = router.oneshot(request).await;
+            let response = inner.oneshot(request).await;
             drop(busy);
             response
         }
     });
-    let conn = builder.serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service));
+    let conn = builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
     tokio::pin!(conn);
     let mut closing = false;
+    // Once asked to close, a connection gets CLOSE_GRACE to do so with no
+    // request in flight; then it is dropped. hyper leaves an HTTP/2
+    // connection whose client never sent the preface waiting for it.
+    let grace = tokio::time::sleep(CLOSE_GRACE);
+    tokio::pin!(grace);
     loop {
         tokio::select! {
             result = conn.as_mut() => {
@@ -102,15 +148,27 @@ async fn connection(
             () = shutdown.cancelled(), if !closing => {
                 conn.as_mut().graceful_shutdown();
                 closing = true;
+                grace.as_mut().reset(Instant::now() + CLOSE_GRACE);
             }
             () = idle_for(&mut watch, idle), if !closing => {
                 tracing::debug!(%peer, "closing an idle http connection");
                 conn.as_mut().graceful_shutdown();
                 closing = true;
+                grace.as_mut().reset(Instant::now() + CLOSE_GRACE);
+            }
+            () = grace.as_mut(), if closing => {
+                if watch.borrow().0 == 0 {
+                    tracing::debug!(%peer, "dropping an http connection that did not close");
+                    return;
+                }
+                grace.as_mut().reset(Instant::now() + CLOSE_GRACE);
             }
         }
     }
 }
+
+/// How long a connection asked to close may take with no request in flight.
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 /// Resolves once no request has been in flight for `idle`.
 async fn idle_for(watch: &mut watch::Receiver<(usize, Instant)>, idle: Duration) {

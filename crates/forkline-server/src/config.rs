@@ -14,6 +14,7 @@
 //! [[grpc]]
 //! addr = "0.0.0.0:50051"
 //! methods = { Echo = "echo" }     # /forkline.v1.Plans/Echo runs plan `echo`
+//! idle_timeout_ms = 60000         # close connections with no call in flight this long
 //!
 //! [telemetry]
 //! log_format = "json"             # or "text"
@@ -22,6 +23,7 @@
 //! [[tcp]]
 //! addr = "0.0.0.0:7000"
 //! plan = "echo"                   # length-delimited frames, one request each
+//! idle_timeout_ms = 60000         # close connections idle this long
 //!
 //! [admin]
 //! addr = "127.0.0.1:6789"         # /healthz /readyz /metrics /admin/{snapshot,reload,rollback}
@@ -103,6 +105,10 @@ pub struct TcpListenerConfig {
     /// Requests one connection may have in flight (responses keep request order).
     #[serde(default = "default_pipeline")]
     pub max_in_flight_per_connection: usize,
+    /// Close a connection that has had no request in flight and sent no
+    /// complete frame for this long. Default 60 s.
+    #[serde(default = "default_http_timeout_ms")]
+    pub idle_timeout_ms: u64,
 }
 
 fn default_max_frame() -> usize {
@@ -265,6 +271,18 @@ pub struct GrpcListener {
     pub addr: SocketAddr,
     /// Method name to plan name: `/forkline.v1.Plans/<method>`.
     pub methods: BTreeMap<String, String>,
+    /// Close a connection that has had no call in flight for this long,
+    /// including one that never sent the HTTP/2 preface. Default 60 s.
+    #[serde(default = "default_http_timeout_ms")]
+    pub idle_timeout_ms: u64,
+}
+
+impl GrpcListener {
+    pub(crate) fn timeouts(&self) -> crate::http_serve::Timeouts {
+        let idle = std::time::Duration::from_millis(self.idle_timeout_ms);
+        // HTTP/2 only, so the HTTP/1 header-read timeout never applies.
+        crate::http_serve::Timeouts { header_read: idle, idle }
+    }
 }
 
 /// Log output format.
@@ -371,6 +389,9 @@ impl ServerConfig {
             if l.max_frame_bytes == 0 || l.max_in_flight_per_connection == 0 {
                 problems.push(format!("tcp {}: max_frame_bytes and max_in_flight_per_connection must be > 0", l.addr));
             }
+            if l.idle_timeout_ms == 0 {
+                problems.push(format!("tcp {}: idle_timeout_ms must be > 0", l.addr));
+            }
         }
         if let Some(a) = self.admission.as_ref().filter(|a| a.red == 0 || a.green >= a.red) {
             problems.push(format!("admission: need 0 < green < red (green = {}, red = {})", a.green, a.red));
@@ -399,6 +420,9 @@ impl ServerConfig {
             }
         }
         for l in &self.grpc {
+            if l.idle_timeout_ms == 0 {
+                problems.push(format!("grpc {}: idle_timeout_ms must be > 0", l.addr));
+            }
             for (method, plan) in &l.methods {
                 if method.is_empty() || method.contains('/') {
                     problems.push(format!("grpc {}: `{method}` is not a valid method name", l.addr));

@@ -816,7 +816,6 @@ dependencies = [
  "thiserror",
  "tikv-jemallocator",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "toml",
  "tonic",
