@@ -35,6 +35,7 @@ pub mod metrics {
     pub use crate::metrics_handles::{DURATION_BUCKETS, register};
 }
 mod service;
+mod slow_poll;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -56,6 +57,7 @@ use tracing::Instrument;
 pub use analysis::ExecPlan;
 use metrics_handles::Outcome;
 pub use service::PlanService;
+pub use slow_poll::{DEFAULT_SLOW_POLL, PANIC_ENV as SLOW_POLL_PANIC_ENV};
 
 /// One request as an adapter hands it to the engine.
 #[derive(Clone, Debug)]
@@ -120,6 +122,7 @@ impl Snapshot {
         input: LoadInput<'_>,
         registry: &Registry,
         detached: &TaskTracker,
+        slow: &Arc<slow_poll::SlowPoll>,
     ) -> Result<Self, Diagnostics> {
         let LoadInput { plans: file, services, config_hash } = input;
         let compiled = compile_all_with(file, registry, &services)?;
@@ -127,7 +130,7 @@ impl Snapshot {
             .into_iter()
             .map(|(name, plan)| {
                 let plan: CompiledPlan = Arc::try_unwrap(plan).unwrap_or_else(|shared| (*shared).clone());
-                (name, Arc::new(ExecPlan::new(plan)))
+                (name, Arc::new(ExecPlan::new(plan).with_slow_poll(slow.clone())))
             })
             .collect();
         let plans = Arc::new(plans);
@@ -181,6 +184,7 @@ pub struct EngineBuilder {
     registry: Arc<Registry>,
     history: usize,
     max_queue: Option<std::time::Duration>,
+    slow_poll: Option<std::time::Duration>,
 }
 
 impl EngineBuilder {
@@ -196,10 +200,19 @@ impl EngineBuilder {
         self
     }
 
+    /// Report a poll of a node that holds a worker thread longer than this
+    /// (default [`DEFAULT_SLOW_POLL`], 10 ms; `None` switches it off). See
+    /// [`Engine::set_slow_poll`].
+    pub fn slow_poll(mut self, threshold: Option<std::time::Duration>) -> Self {
+        self.slow_poll = threshold;
+        self
+    }
+
     /// Compile the first snapshot.
     pub fn build(self, input: LoadInput<'_>) -> Result<Engine, Diagnostics> {
         let detached = TaskTracker::new();
-        let snapshot = Snapshot::build(1, input, &self.registry, &detached)?;
+        let slow = Arc::new(slow_poll::SlowPoll::new(self.slow_poll));
+        let snapshot = Snapshot::build(1, input, &self.registry, &detached, &slow)?;
         metrics_handles::snapshot_version(1);
         Ok(Engine {
             registry: self.registry,
@@ -214,6 +227,7 @@ impl EngineBuilder {
                 self.max_queue.map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)),
             ),
             detached,
+            slow,
         })
     }
 }
@@ -232,12 +246,13 @@ pub struct Engine {
     next_request: AtomicU64,
     max_queue_nanos: AtomicU64,
     detached: TaskTracker,
+    slow: Arc<slow_poll::SlowPoll>,
 }
 
 impl Engine {
     /// Start building an engine for `registry`'s modules.
     pub fn builder(registry: Arc<Registry>) -> EngineBuilder {
-        EngineBuilder { registry, history: DEFAULT_HISTORY, max_queue: None }
+        EngineBuilder { registry, history: DEFAULT_HISTORY, max_queue: None, slow_poll: Some(DEFAULT_SLOW_POLL) }
     }
 
     /// Compile `plans` against `registry`, with no services. Fails with every problem found.
@@ -273,6 +288,23 @@ impl Engine {
     pub fn set_max_queue(&self, max: Option<std::time::Duration>) {
         let nanos = max.map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
         self.max_queue_nanos.store(nanos, Ordering::Relaxed);
+    }
+
+    /// Report polls of nodes that hold a worker thread longer than
+    /// `threshold` (`None`: off). Every poll of a module's future and every
+    /// call of a synchronous node is timed; a slow one adds to
+    /// `forkline_node_slow_polls_total{plan,node}` and logs a warning naming
+    /// the plan and node, at most once per node every 10 s. Such a node does
+    /// blocking or CPU-heavy work that belongs in `cx.blocking` or a pool.
+    /// If the environment variable [`SLOW_POLL_PANIC_ENV`] is set (in a test
+    /// suite), a poll longer than that many milliseconds panics.
+    pub fn set_slow_poll(&self, threshold: Option<std::time::Duration>) {
+        self.slow.set(threshold);
+    }
+
+    /// The slow-poll threshold, if on.
+    pub fn slow_poll(&self) -> Option<std::time::Duration> {
+        self.slow.threshold()
     }
 
     /// Compile a new plans file and swap it in, keeping the services. On
@@ -321,7 +353,7 @@ impl Engine {
         // One load at a time, so versions and history stay in order.
         let _guard = self.reload_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let version = self.last_version.load(Ordering::Relaxed) + 1;
-        let built = Snapshot::build(version, input, &self.registry, &self.detached).and_then(|snapshot| {
+        let built = Snapshot::build(version, input, &self.registry, &self.detached, &self.slow).and_then(|snapshot| {
             let missing = self.missing_required(&snapshot.plans);
             if missing.is_empty() { Ok(snapshot) } else { Err(missing) }
         });

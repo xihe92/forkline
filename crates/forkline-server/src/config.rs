@@ -3,6 +3,7 @@
 //! ```toml
 //! [runtime]
 //! worker_threads = 8          # default: one per core
+//! slow_poll_ms = 10           # report nodes that block a worker this long (0: off)
 //!
 //! [[http]]
 //! addr = "0.0.0.0:8080"
@@ -207,13 +208,34 @@ impl Default for ShutdownConfig {
 }
 
 /// Tokio runtime settings.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// Worker threads; default one per core.
     pub worker_threads: Option<usize>,
     /// Upper bound on the blocking pool used by `Ctx::blocking`.
     pub max_blocking_threads: Option<usize>,
+    /// Report a node that holds a worker thread longer than this in one poll
+    /// (default 10; 0 switches it off). See `Engine::set_slow_poll`.
+    #[serde(default = "default_slow_poll_ms")]
+    pub slow_poll_ms: u64,
+}
+
+fn default_slow_poll_ms() -> u64 {
+    u64::try_from(forkline_engine::DEFAULT_SLOW_POLL.as_millis()).unwrap_or(10)
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self { worker_threads: None, max_blocking_threads: None, slow_poll_ms: default_slow_poll_ms() }
+    }
+}
+
+impl RuntimeConfig {
+    /// The slow-poll threshold, `None` when switched off.
+    pub fn slow_poll(&self) -> Option<std::time::Duration> {
+        (self.slow_poll_ms > 0).then(|| std::time::Duration::from_millis(self.slow_poll_ms))
+    }
 }
 
 /// One HTTP listener.

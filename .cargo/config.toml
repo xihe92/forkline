@@ -1,0 +1,9 @@
+# Applies to every cargo command run in this workspace, cargo nextest
+# included.
+
+[env]
+# Forkline's own tests fail when a node holds a worker thread for more than
+# 50 ms in one poll: the engine panics naming the plan and node (see
+# forkline-engine's slow_poll module). Production servers only count and
+# log slow polls, at `[runtime] slow_poll_ms` (default 10 ms).
+FORKLINE_PANIC_ON_SLOW_POLL_MS = "50"

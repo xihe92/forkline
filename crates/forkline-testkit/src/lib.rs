@@ -102,6 +102,18 @@ pub enum TestError {
     /// The module returned an error.
     #[error("{kind}: {message}", kind = .0.kind(), message = .0.message())]
     Node(NodeError),
+    /// The module held the thread longer than [`Harness::max_poll`] allows in
+    /// one poll (or one call, for the synchronous kinds).
+    #[error(
+        "the module held the thread for {took:?} in one poll (max_poll {limit:?}); \
+         move blocking or CPU-heavy work to cx.blocking or a pool"
+    )]
+    Blocked {
+        /// The longest poll.
+        took: Duration,
+        /// The limit set with [`Harness::max_poll`].
+        limit: Duration,
+    },
 }
 
 impl From<NodeError> for TestError {
@@ -204,6 +216,7 @@ pub struct Harness<M> {
     base: Inputs,
     paths: Vec<Inputs>,
     on_conflict: OnConflict,
+    max_poll: Option<Duration>,
 }
 
 impl<M> fmt::Debug for Harness<M> {
@@ -224,6 +237,7 @@ impl<M: Build> Harness<M> {
             base: Inputs::new(),
             paths: Vec::new(),
             on_conflict: OnConflict::Error,
+            max_poll: None,
         }
     }
 
@@ -291,6 +305,31 @@ impl<M: Build> Harness<M> {
         self
     }
 
+    /// Fail the run with [`TestError::Blocked`] when the module holds the
+    /// thread longer than `limit` in one poll (one call, for the synchronous
+    /// kinds), as the engine's blocking detector would report it (10 ms by
+    /// default). Waiting with `.await` is never counted; blocking calls and
+    /// long computations are.
+    pub fn max_poll(mut self, limit: Duration) -> Self {
+        self.max_poll = Some(limit);
+        self
+    }
+
+    /// Run a synchronous module body, checked against [`max_poll`](Self::max_poll).
+    fn timed<T>(&self, f: impl FnOnce() -> Result<T, NodeError>) -> Result<T, TestError> {
+        let started = std::time::Instant::now();
+        let out = f();
+        self.check_poll(started.elapsed())?;
+        Ok(out?)
+    }
+
+    fn check_poll(&self, took: Duration) -> Result<(), TestError> {
+        match self.max_poll {
+            Some(limit) if took > limit => Err(TestError::Blocked { took, limit }),
+            _ => Ok(()),
+        }
+    }
+
     fn cx(&self) -> Ctx {
         Ctx::from_parts(CtxParts {
             request_id: RequestId(1),
@@ -343,8 +382,19 @@ impl<M: Module> Harness<M> {
         let (keys, mut map) = self.prepare(contract)?;
         let slots = Self::slots(contract.len());
         let cx = self.cx();
-        let call = self.module.call(&cx, M::Io::bind(&mut map, &slots));
-        tokio::time::timeout_at(cx.deadline(), call).await.map_err(|_| {
+        let mut longest = Duration::ZERO;
+        let result = {
+            let mut call = std::pin::pin!(self.module.call(&cx, M::Io::bind(&mut map, &slots)));
+            let timed = std::future::poll_fn(|task| {
+                let started = std::time::Instant::now();
+                let poll = call.as_mut().poll(task);
+                longest = longest.max(started.elapsed());
+                poll
+            });
+            tokio::time::timeout_at(cx.deadline(), timed).await
+        };
+        self.check_poll(longest)?;
+        result.map_err(|_| {
             NodeError::new(forkline_core::ErrorKind::Deadline, "deadline passed while the node was running")
         })??;
         Ok(Outputs { map, names: keys.names })
@@ -357,7 +407,7 @@ impl<M: Decode> Harness<M> {
         let contract = contract_of!(M);
         let (keys, mut map) = self.prepare(contract)?;
         let slots = Self::slots(contract.len());
-        self.module.decode(&self.cx(), &body.into(), M::Io::bind(&mut map, &slots))?;
+        self.timed(|| self.module.decode(&self.cx(), &body.into(), M::Io::bind(&mut map, &slots)))?;
         Ok(Outputs { map, names: keys.names })
     }
 }
@@ -368,7 +418,7 @@ impl<M: Branch> Harness<M> {
         let contract = contract_of!(M);
         let (_, mut map) = self.prepare(contract)?;
         let slots = Self::slots(contract.len());
-        Ok(self.module.choose(&self.cx(), M::Io::bind(&mut map, &slots))?)
+        self.timed(|| self.module.choose(&self.cx(), M::Io::bind(&mut map, &slots)))
     }
 }
 
@@ -378,7 +428,7 @@ impl<M: MultiBranch> Harness<M> {
         let contract = contract_of!(M);
         let (_, mut map) = self.prepare(contract)?;
         let slots = Self::slots(contract.len());
-        Ok(self.module.choose(&self.cx(), M::Io::bind(&mut map, &slots))?)
+        self.timed(|| self.module.choose(&self.cx(), M::Io::bind(&mut map, &slots)))
     }
 }
 
@@ -388,7 +438,7 @@ impl<M: Encode> Harness<M> {
         let contract = contract_of!(M);
         let (_, mut map) = self.prepare(contract)?;
         let slots = Self::slots(contract.len());
-        Ok(self.module.encode(&self.cx(), M::Io::bind(&mut map, &slots))?)
+        self.timed(|| self.module.encode(&self.cx(), M::Io::bind(&mut map, &slots)))
     }
 }
 
@@ -398,7 +448,7 @@ impl<M: Terminal> Harness<M> {
         let contract = contract_of!(M);
         let (_, mut map) = self.prepare(contract)?;
         let slots = Self::slots(contract.len());
-        Ok(self.module.respond(&self.cx(), M::Io::bind(&mut map, &slots), error)?)
+        self.timed(|| self.module.respond(&self.cx(), M::Io::bind(&mut map, &slots), error))
     }
 }
 
@@ -424,7 +474,8 @@ impl<M: Join> Harness<M> {
         for changes in &self.paths {
             let mut path = base.clean_copy();
             Self::fill(&mut keys, &mut path, changes)?;
-            let step = self.module.on_path(&cx, M::Io::bind(&mut path, &slots), M::Io::bind(&mut merged, &slots))?;
+            let step = self
+                .timed(|| self.module.on_path(&cx, M::Io::bind(&mut path, &slots), M::Io::bind(&mut merged, &slots)))?;
             arrivals.push(path);
             if step == JoinStep::Done {
                 break;

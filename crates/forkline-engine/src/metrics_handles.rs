@@ -6,6 +6,7 @@
 //! the request path is a few atomic operations with no label lookups.
 
 use std::sync::LazyLock;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use forkline_core::{ErrorKind, Reply, Status};
@@ -69,6 +70,7 @@ struct EngineMetrics {
     request_duration: Histograms<PlanLabels>,
     node_duration: Histograms<NodeLabels>,
     node_errors: Family<NodeErrorLabels, Counter>,
+    node_slow_polls: Family<NodeLabels, Counter>,
     merge_conflicts: Family<ConflictLabels, Counter>,
     reloads: Family<ResultLabels, Counter>,
     snapshot_version: Gauge,
@@ -79,6 +81,7 @@ static METRICS: LazyLock<EngineMetrics> = LazyLock::new(|| EngineMetrics {
     request_duration: Family::new_with_constructor(duration_histogram as fn() -> Histogram),
     node_duration: Family::new_with_constructor(duration_histogram as fn() -> Histogram),
     node_errors: Family::default(),
+    node_slow_polls: Family::default(),
     merge_conflicts: Family::default(),
     reloads: Family::default(),
     snapshot_version: Gauge::default(),
@@ -99,6 +102,11 @@ pub fn register(registry: &mut Registry) {
         m.node_duration.clone(),
     );
     registry.register("forkline_node_errors", "Node failures by plan, node and kind", m.node_errors.clone());
+    registry.register(
+        "forkline_node_slow_polls",
+        "Polls that held a worker thread longer than the slow-poll threshold, by plan and node",
+        m.node_slow_polls.clone(),
+    );
     registry.register(
         "forkline_merge_conflicts",
         "Keys changed on several paths and not resolved by the join",
@@ -177,6 +185,9 @@ pub(crate) struct PlanMetrics {
     requests: Vec<Counter>,
     duration: Histogram,
     nodes: Vec<Histogram>,
+    slow_polls: Vec<Counter>,
+    /// When each node last logged a slow poll (ms since an epoch; 0: never).
+    last_warned: Vec<AtomicU64>,
 }
 
 impl PlanMetrics {
@@ -187,13 +198,21 @@ impl PlanMetrics {
             .map(|o| m.requests.get_or_create(&RequestLabels { plan: plan.to_owned(), outcome: o.label() }).clone())
             .collect();
         let duration = m.request_duration.get_or_create(&PlanLabels { plan: plan.to_owned() }).clone();
-        let nodes = nodes
-            .iter()
-            .map(|n| {
-                m.node_duration.get_or_create(&NodeLabels { plan: plan.to_owned(), node: (*n).to_owned() }).clone()
-            })
-            .collect();
-        Self { requests, duration, nodes }
+        let label = |n: &&str| NodeLabels { plan: plan.to_owned(), node: (*n).to_owned() };
+        let slow_polls = nodes.iter().map(|n| m.node_slow_polls.get_or_create(&label(n)).clone()).collect();
+        let last_warned = nodes.iter().map(|_| AtomicU64::new(0)).collect();
+        let nodes = nodes.iter().map(|n| m.node_duration.get_or_create(&label(n)).clone()).collect();
+        Self { requests, duration, nodes, slow_polls, last_warned }
+    }
+
+    pub(crate) fn slow_poll(&self, id: usize) {
+        if let Some(c) = self.slow_polls.get(id) {
+            c.inc();
+        }
+    }
+
+    pub(crate) fn last_warned(&self, id: usize) -> Option<&AtomicU64> {
+        self.last_warned.get(id)
     }
 
     pub(crate) fn record(&self, outcome: Outcome, elapsed: Duration) {

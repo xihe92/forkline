@@ -251,3 +251,67 @@ fn decode_branch_encode_and_terminal() {
     let reply = Harness::new(Term).run_terminal(&error).unwrap();
     assert_eq!((reply.status, reply.body), (Status::Error(ErrorKind::Deadline), Bytes::from("late")));
 }
+
+/// Blocks the thread with a synchronous sleep: the bug `max_poll` catches.
+struct Blocks;
+impl Build for Blocks {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Module for Blocks {
+    type Io<'a> = forkline_core::Empty<'a>;
+    async fn call(&self, _: &Ctx, _: forkline_core::Empty<'_>) -> Result<(), NodeError> {
+        std::thread::sleep(Duration::from_millis(30));
+        Ok(())
+    }
+}
+
+/// A decoder that blocks.
+struct SlowDec;
+impl Build for SlowDec {
+    type Config = NoConfig;
+    fn build(_: NoConfig) -> Result<Self, BuildError> {
+        Ok(Self)
+    }
+}
+impl Decode for SlowDec {
+    type Io<'a> = BodyIo<'a>;
+    fn decode(&self, _: &Ctx, body: &Bytes, mut io: BodyIo<'_>) -> Result<(), NodeError> {
+        std::thread::sleep(Duration::from_millis(30));
+        io.set_body(body.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn max_poll_fails_a_module_that_blocks() {
+    let err = Harness::new(Blocks).max_poll(Duration::from_millis(10)).run_module().await.unwrap_err();
+    assert!(err.to_string().contains("move blocking or CPU-heavy work to cx.blocking or a pool"), "{err}");
+    let TestError::Blocked { took, limit } = err else { panic!("{err}") };
+    assert!(took >= Duration::from_millis(30), "{took:?}");
+    assert_eq!(limit, Duration::from_millis(10));
+    assert!(Harness::new(Blocks).run_module().await.is_ok(), "off unless asked for");
+}
+
+#[tokio::test]
+async fn max_poll_ignores_waiting() {
+    // The mock service waits 50 ms, yielding the thread: not a blocking poll.
+    let services = forkline_core::ServiceRegistry::new().with("horoscope", mock(50));
+    let out = Harness::<Lookup>::from_config("service = \"horoscope\"", services)
+        .unwrap()
+        .max_poll(Duration::from_millis(10))
+        .inputs(inputs! { sign: String::from("leo") })
+        .run_module()
+        .await
+        .unwrap();
+    assert_eq!(out.get::<String>("svc_response").map(String::as_str), Some("bold"));
+}
+
+#[test]
+fn max_poll_covers_synchronous_modules() {
+    let err = Harness::new(SlowDec).max_poll(Duration::from_millis(10)).run_decode("x").unwrap_err();
+    assert!(matches!(err, TestError::Blocked { .. }), "{err}");
+    assert!(Harness::new(SlowDec).max_poll(Duration::from_millis(100)).run_decode("x").is_ok());
+}

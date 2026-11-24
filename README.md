@@ -273,6 +273,31 @@ checked against the configured pools and listeners. In a module test, give
 the harness a registry holding the pool:
 `ServiceRegistry::new().with_pool("scoring", Pool::new("scoring", 2, 16)?)`.
 
+### Finding a module that blocks
+
+The engine times every poll of every node. One that holds its worker thread
+longer than `slow_poll_ms` (default 10 ms; 0 switches it off) adds to
+`forkline_node_slow_polls_total{plan,node}` and logs a warning naming the plan
+and node, at most once per node every 10 s. Waiting with `.await` never counts,
+however long; a blocking call or a long computation does.
+
+```toml
+[runtime]
+slow_poll_ms = 10
+```
+
+The timing reuses the clock reads the node-duration metric already makes, so
+it costs nothing measurable. In a module's own test,
+`Harness::max_poll(Duration::from_millis(10))` fails the run with
+`TestError::Blocked` instead. A test suite can set
+`FORKLINE_PANIC_ON_SLOW_POLL_MS`: any longer poll then panics, naming the
+node. Forkline's own tests run with 50 ms (`.cargo/config.toml`).
+
+Built with `RUSTFLAGS="--cfg tokio_unstable"`, the server's runtime also times
+every task poll, not only nodes, and counts slow ones in
+`forkline_task_slow_polls_total`, logging where the task was spawned. CI runs
+`scripts/blocking-check.sh` this way nightly.
+
 ## Testing modules
 
 ```rust

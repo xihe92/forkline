@@ -46,6 +46,50 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// Times each poll of a module's future against the slow-poll threshold,
+/// and yields the output with the time the last poll ended. The first poll
+/// starts at the node's start time, so a module that completes in one poll
+/// costs no clock reads beyond the node-duration metric's. A poll that ends
+/// in a panic (`Err` from `catch_unwind`) is not checked: the panic is
+/// reported as such, and unwinding (slow the first time in a process) is not
+/// the module blocking.
+struct Timed<'p, F> {
+    inner: F,
+    plan: &'p ExecPlan,
+    node: NodeId,
+    next_start: Option<std::time::Instant>,
+}
+
+impl<T, P, F: Future<Output = Result<T, P>> + Unpin> Future for Timed<'_, F> {
+    type Output = (F::Output, std::time::Instant);
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let started = self.next_start.take().unwrap_or_else(std::time::Instant::now);
+        let out = std::pin::Pin::new(&mut self.inner).poll(cx);
+        let end = std::time::Instant::now();
+        if !matches!(out, std::task::Poll::Ready(Err(_))) {
+            self.plan.slow.check(end.saturating_duration_since(started), self.plan, self.node);
+        }
+        out.map(|out| (out, end))
+    }
+}
+
+/// True unless `result` is a caught panic (see [`Timed`]).
+fn not_a_panic<T>(result: &Result<T, NodeError>) -> bool {
+    !matches!(result, Err(e) if e.kind() == ErrorKind::Panic)
+}
+
+/// Run a synchronous join or terminal body, timed against the slow-poll
+/// threshold. (Path nodes reuse the node-duration timing instead.)
+fn timed<T>(plan: &ExecPlan, node: NodeId, f: impl FnOnce() -> Result<T, NodeError>) -> Result<T, NodeError> {
+    let started = std::time::Instant::now();
+    let out = f();
+    if not_a_panic(&out) {
+        plan.slow.check(started.elapsed(), plan, node);
+    }
+    out
+}
+
 /// Run a synchronous node body, turning a panic into an error.
 fn guarded<T>(span: &tracing::Span, f: impl FnOnce() -> Result<T, NodeError>) -> Result<T, NodeError> {
     span.in_scope(|| {
@@ -92,25 +136,34 @@ async fn segment(
         let span = tracing::info_span!("node", node = %node.name, module = %node.module, kind = node.kind().as_str());
         let slots = &node.slots;
         let started = std::time::Instant::now();
+        // For async modules: when their last poll ended.
+        let mut ended = None;
         let step: Result<Step, NodeError> = match &node.imp {
             NodeImpl::Decode(m) => guarded(&span, || m.dyn_decode(&cx, body, &mut map, slots)).map(|()| Step::Next),
             NodeImpl::Module(m) => {
-                let call = AssertUnwindSafe(m.dyn_call(&cx, &mut map, slots)).catch_unwind();
+                let inner = AssertUnwindSafe(m.dyn_call(&cx, &mut map, slots)).catch_unwind();
+                let call = Timed { inner, plan: &plan, node: id, next_start: Some(started) };
                 let timed = tokio::time::timeout_at(cx.deadline(), call).instrument(span);
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => return SegEnd::Cancelled,
                     outcome = timed => match outcome {
                         Err(_elapsed) => Err(NodeError::new(ErrorKind::Deadline, "deadline passed while the node was running")),
-                        Ok(Err(panic)) => Err(NodeError::new(ErrorKind::Panic, panic_message(&*panic))),
-                        // A module that fails once the deadline has passed
-                        // was cut off by it (a service call bounded by the
-                        // same deadline can return just before the timer
-                        // above fires), so report it as a deadline.
-                        Ok(Ok(Err(e))) if e.kind() != ErrorKind::Deadline && Instant::now() >= cx.deadline() => {
-                            Err(NodeError::new(ErrorKind::Deadline, format!("deadline passed: {}", e.message())))
+                        Ok((result, end)) => {
+                            ended = Some(end);
+                            match result {
+                                Err(panic) => Err(NodeError::new(ErrorKind::Panic, panic_message(&*panic))),
+                                // A module that fails once the deadline has
+                                // passed was cut off by it (a service call
+                                // bounded by the same deadline can return just
+                                // before the timer above fires), so report it
+                                // as a deadline.
+                                Ok(Err(e)) if e.kind() != ErrorKind::Deadline && Instant::now() >= cx.deadline() => {
+                                    Err(NodeError::new(ErrorKind::Deadline, format!("deadline passed: {}", e.message())))
+                                }
+                                Ok(result) => result.map(|()| Step::Next),
+                            }
                         }
-                        Ok(Ok(result)) => result.map(|()| Step::Next),
                     },
                 }
             }
@@ -121,7 +174,14 @@ async fn segment(
                 return fail(ErrorKind::Internal, "join and terminal nodes are not run inside a path", map);
             }
         };
-        plan.metrics.node(id, started.elapsed());
+        let took = ended.map_or_else(|| started.elapsed(), |end| end.saturating_duration_since(started));
+        // A synchronous node's whole call was one poll. An async module's
+        // polls were checked one by one; one cut off by its deadline or by
+        // cancellation has no final poll, and waiting is never slow.
+        if !matches!(node.imp, NodeImpl::Module(_)) && not_a_panic(&step) {
+            plan.slow.check(took, &plan, id);
+        }
+        plan.metrics.node(id, took);
         let next = match step {
             Err(e) => {
                 count_error(&plan, &node.name, e.kind());
@@ -333,7 +393,9 @@ impl Run {
         };
         let span = tracing::info_span!("node", node = %node.name, module = %node.module, kind = "join");
         let step = match self.joins.get_mut(&join) {
-            Some(state) => guarded(&span, || module.dyn_on_path(&self.cx, &mut map, &mut state.merged, &node.slots)),
+            Some(state) => timed(&self.plan, join, || {
+                guarded(&span, || module.dyn_on_path(&self.cx, &mut map, &mut state.merged, &node.slots))
+            }),
             None => return Ok(()),
         };
         match step {
@@ -571,9 +633,8 @@ fn run_terminal(plan: &ExecPlan, cx: &Ctx, map: &mut RequestMap, error: PlanErro
         });
     };
     let span = tracing::info_span!("node", node = %node.name, module = %node.module, kind = "terminal");
-    guarded(&span, || terminal.dyn_respond(cx, map, &node.slots, &error)).map_err(|e| EngineError::TerminalFailed {
-        error,
-        terminal: node.name.clone(),
-        message: e.message().to_owned(),
+    let terminal_id = plan.compiled.terminal;
+    timed(plan, terminal_id, || guarded(&span, || terminal.dyn_respond(cx, map, &node.slots, &error))).map_err(|e| {
+        EngineError::TerminalFailed { error, terminal: node.name.clone(), message: e.message().to_owned() }
     })
 }

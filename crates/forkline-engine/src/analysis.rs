@@ -18,6 +18,8 @@ pub struct ExecPlan {
     pub(crate) encode: Option<NodeId>,
     /// Metric handles.
     pub(crate) metrics: std::sync::Arc<crate::metrics_handles::PlanMetrics>,
+    /// The engine's slow-poll setting.
+    pub(crate) slow: std::sync::Arc<crate::slow_poll::SlowPoll>,
 }
 
 impl ExecPlan {
@@ -61,7 +63,14 @@ impl ExecPlan {
         let encode = compiled.nodes.iter().position(|node| node.kind() == NodeKind::Encode);
         let names: Vec<&str> = compiled.nodes.iter().map(|n| &*n.name).collect();
         let metrics = std::sync::Arc::new(crate::metrics_handles::PlanMetrics::new(&compiled.name, &names));
-        Self { compiled, reach, owner, encode, metrics }
+        let slow = std::sync::Arc::new(crate::slow_poll::SlowPoll::new(Some(crate::slow_poll::DEFAULT_SLOW_POLL)));
+        Self { compiled, reach, owner, encode, metrics, slow }
+    }
+
+    /// Share an engine's slow-poll setting.
+    pub(crate) fn with_slow_poll(mut self, slow: std::sync::Arc<crate::slow_poll::SlowPoll>) -> Self {
+        self.slow = slow;
+        self
     }
 
     /// True when `to` is reachable from `from`.

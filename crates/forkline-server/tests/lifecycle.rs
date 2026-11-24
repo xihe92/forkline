@@ -151,3 +151,19 @@ fn server_config_files_report_where_they_failed() {
     assert!(err.starts_with(&format!("{}:", path.display())) && err.contains("unknown field `bogus`"), "{err}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn runtime_slow_poll_ms_sets_the_engines_blocking_detector() {
+    let listener = "[[http]]\naddr = \"127.0.0.1:0\"\nroutes = { \"/p\" = \"p\" }\n";
+    for (runtime, expected) in [
+        ("", Some(Duration::from_millis(10))),
+        ("[runtime]\nslow_poll_ms = 25\n", Some(Duration::from_millis(25))),
+        ("[runtime]\nslow_poll_ms = 0\n", None),
+    ] {
+        let engine = Arc::new(Engine::new(registry(), &plans(&[("p", "", 0, 1000)])).unwrap());
+        engine.set_slow_poll(Some(Duration::from_secs(1)));
+        let config = ServerConfig::from_toml_str(&format!("{runtime}{listener}")).unwrap();
+        drop(BoundServer::bind(&config, engine.clone()).await.unwrap());
+        assert_eq!(engine.slow_poll(), expected, "{runtime:?}");
+    }
+}

@@ -64,6 +64,8 @@ unsafe_code = "forbid"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
+# tokio-console and the task-poll hooks are built with --cfg tokio_unstable.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

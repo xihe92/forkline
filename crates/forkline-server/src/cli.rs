@@ -262,6 +262,10 @@ impl App {
         if let Some(n) = config.runtime.max_blocking_threads {
             builder.max_blocking_threads(n);
         }
+        #[cfg(tokio_unstable)]
+        if let Some(threshold) = config.runtime.slow_poll() {
+            crate::task_polls::install(&mut builder, threshold);
+        }
         let runtime = match builder.build() {
             Ok(rt) => rt,
             Err(e) => {

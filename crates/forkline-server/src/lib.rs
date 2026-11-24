@@ -26,6 +26,7 @@ pub mod grpc;
 pub mod http;
 mod http_serve;
 mod status;
+mod task_polls;
 pub mod tcp;
 pub mod telemetry;
 
@@ -130,6 +131,7 @@ impl BoundServer {
         config.validate(&engine).map_err(ServerError::Config)?;
         // From here on, a reload that drops a plan a listener serves is rejected.
         engine.require_plans(config.served_plans());
+        engine.set_slow_poll(config.runtime.slow_poll());
         let admission = config.admission.as_ref().map(|a| Arc::new(Admission::new(a)));
         if let Some(a) = &config.admission {
             engine.set_max_queue(a.max_queue_ms.map(Duration::from_millis));

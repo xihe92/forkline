@@ -99,6 +99,20 @@ see "Before 1.0.0" for what remains.
   loop as HTTP, HTTP/2 only; tonic still decodes the calls. A connection
   asked to close that hasn't a second later with nothing in flight is
   dropped, so a silent client can't hold up shutdown either.
+- Blocking detector. The engine times every poll of every node; one longer
+  than the threshold (`Engine::set_slow_poll`, `[runtime] slow_poll_ms`,
+  default 10 ms, 0 off) adds to `forkline_node_slow_polls_total{plan,node}`
+  and logs a warning naming the plan and node, at most once per node every
+  10 s. Waiting never counts, nor does a poll that panicked (the first
+  unwind in a process can take 100 ms; the panic is reported as one). It
+  reuses the node-duration clock reads; the benchmark gate shows no
+  change beyond 10% (the 8-way fan-out, whose joins are timed separately,
+  +8%). `FORKLINE_PANIC_ON_SLOW_POLL_MS` makes a longer poll panic naming
+  the node; Forkline's own tests run with 50 ms (`.cargo/config.toml`).
+  `Harness::max_poll` fails a module test with `TestError::Blocked`. Built
+  with `--cfg tokio_unstable`, the server also times every task poll
+  (`forkline_task_slow_polls_total`, logged with the spawn location), which
+  `scripts/blocking-check.sh` checks nightly under load.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

@@ -73,3 +73,20 @@ jobs:
           }
       - name: p99 under 50 µs for the 7-node fork/join plan
         run: cargo bench -p forkline-engine --bench latency
+
+  # The engine times every node in every test (and fails a test whose node
+  # blocks for 50 ms, see .cargo/config.toml). This covers the rest: the echo
+  # example built with --cfg tokio_unstable times every task poll under load.
+  blocking:
+    name: no task poll blocks a worker thread (tokio_unstable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/blocking-check.sh 50 4000
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: blocking-check
+          path: target/blocking-check/
