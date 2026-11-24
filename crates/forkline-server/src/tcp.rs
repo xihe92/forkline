@@ -119,6 +119,7 @@ async fn handle(conn: Conn, peer: SocketAddr, body: Bytes) -> Bytes {
                 Status::Ok => STATUS_OK,
                 Status::Error(ErrorKind::BadRequest) => STATUS_BAD_REQUEST,
                 Status::Error(ErrorKind::Deadline) => STATUS_DEADLINE,
+                Status::Error(ErrorKind::Overloaded) => STATUS_OVERLOADED,
                 Status::Error(_) => STATUS_FAILED,
             };
             frame(status, &reply.body)

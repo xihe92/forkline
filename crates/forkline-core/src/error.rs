@@ -22,6 +22,9 @@ pub enum ErrorKind {
     MergeConflict,
     /// The engine hit a state that validation should have ruled out.
     Internal,
+    /// A resource was full, so the work was refused rather than queued, for
+    /// example a full thread pool (maps to HTTP 503 / RESOURCE_EXHAUSTED).
+    Overloaded,
 }
 
 impl ErrorKind {
@@ -35,6 +38,7 @@ impl ErrorKind {
             ErrorKind::Panic => "panic",
             ErrorKind::MergeConflict => "merge_conflict",
             ErrorKind::Internal => "internal",
+            ErrorKind::Overloaded => "overloaded",
         }
     }
 }

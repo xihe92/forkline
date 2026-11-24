@@ -136,12 +136,13 @@ mod otlp {
 }
 
 /// A Prometheus registry holding every Forkline metric: engine, service
-/// clients and listeners. `GET /metrics` on the admin listener renders it.
+/// clients, listeners and thread pools. `GET /metrics` on the admin listener renders it.
 pub fn metrics_registry() -> std::sync::Arc<prometheus_client::registry::Registry> {
     let mut registry = prometheus_client::registry::Registry::default();
     forkline_engine::metrics::register(&mut registry);
     forkline_services::metrics::register(&mut registry);
     crate::admission::register(&mut registry);
+    forkline_core::pool::register_metrics(&mut registry);
     std::sync::Arc::new(registry)
 }
 

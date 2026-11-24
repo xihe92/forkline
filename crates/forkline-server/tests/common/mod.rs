@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use forkline_core::{
-    Build, BuildError, Ctx, Decode, Empty, Encode, Module, NoConfig, NodeError, PlanError, Registry, Reply, Terminal,
+    Build, BuildContext, BuildError, Ctx, Decode, Empty, Encode, Module, NoConfig, NodeError, PlanError, Pool,
+    Registry, Reply, Terminal,
 };
 use forkline_engine::Engine;
 use forkline_macros::interface;
@@ -102,6 +103,39 @@ impl Encode for ReplyEncoder {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PooledConfig {
+    pub pool: String,
+}
+
+/// Runs each request on its thread pool: a payload `<ms>|text` sleeps `<ms>`
+/// on a pool thread, then replies `text@<thread name>`.
+pub struct Pooled(Pool);
+impl Build for Pooled {
+    type Config = PooledConfig;
+    fn build_with(c: PooledConfig, cx: &BuildContext<'_>) -> Result<Self, BuildError> {
+        Ok(Self(cx.pool(&c.pool)?))
+    }
+}
+impl Module for Pooled {
+    type Io<'a> = WorkIo<'a>;
+    async fn call(&self, cx: &Ctx, mut io: WorkIo<'_>) -> Result<(), NodeError> {
+        let text = String::from_utf8_lossy(&io.payload().cloned().unwrap_or_default()).into_owned();
+        let (ms, text) =
+            text.split_once('|').and_then(|(ms, t)| Some((ms.parse::<u64>().ok()?, t.to_owned()))).unwrap_or((0, text));
+        let reply = self
+            .0
+            .run(cx, move || {
+                std::thread::sleep(Duration::from_millis(ms));
+                format!("{text}@{}", std::thread::current().name().unwrap_or("?"))
+            })
+            .await?;
+        io.set_reply(Bytes::from(reply));
+        Ok(())
+    }
+}
+
 pub struct ErrorReply;
 impl Build for ErrorReply {
     type Config = NoConfig;
@@ -169,6 +203,7 @@ pub fn modules() -> Registry {
         .decode::<BodyDecoder>("BodyDecoder")
         .module::<Work>("Work")
         .module::<Mark>("Mark")
+        .module::<Pooled>("Pooled")
         .encode::<ReplyEncoder>("ReplyEncoder")
         .terminal::<ErrorReply>("ErrorReply")
         .terminal::<BrokenReply>("BrokenReply")

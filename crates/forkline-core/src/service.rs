@@ -19,6 +19,8 @@ struct Entry {
 #[derive(Clone, Default)]
 pub struct ServiceRegistry {
     entries: BTreeMap<String, Entry>,
+    /// Thread pools, a namespace of their own: `[pools.*]` in `server.toml`.
+    pools: BTreeMap<String, crate::Pool>,
 }
 
 /// A service lookup failed.
@@ -38,6 +40,9 @@ pub enum ServiceLookupError {
         /// The registered type.
         actual: &'static str,
     },
+    /// No thread pool of that name.
+    #[error("pool `{0}` is not configured; add `[pools.{0}]` to server.toml")]
+    MissingPool(String),
 }
 
 impl ServiceRegistry {
@@ -85,6 +90,27 @@ impl ServiceRegistry {
     /// True when there are no services.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Register a thread pool under `name`, replacing any previous one.
+    pub fn insert_pool(&mut self, name: impl Into<String>, pool: crate::Pool) {
+        self.pools.insert(name.into(), pool);
+    }
+
+    /// Builder-style [`insert_pool`](Self::insert_pool), handy in module tests.
+    pub fn with_pool(mut self, name: impl Into<String>, pool: crate::Pool) -> Self {
+        self.insert_pool(name, pool);
+        self
+    }
+
+    /// The thread pool `name`, if one is registered.
+    pub fn pool(&self, name: &str) -> Result<crate::Pool, ServiceLookupError> {
+        self.pools.get(name).cloned().ok_or_else(|| ServiceLookupError::MissingPool(name.to_owned()))
+    }
+
+    /// Registered pool names, sorted.
+    pub fn pool_names(&self) -> impl Iterator<Item = &str> {
+        self.pools.keys().map(String::as_str)
     }
 }
 

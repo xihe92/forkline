@@ -18,7 +18,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use forkline_core::{Registry, ServiceRegistry};
+use std::collections::BTreeMap;
+
+use forkline_core::{Pool, Registry, ServiceRegistry};
 use forkline_engine::{Engine, LoadInput};
 use forkline_plan::PlansFile;
 use forkline_services::{ServiceKinds, ServicesFile};
@@ -49,6 +51,10 @@ enum Command {
     },
     /// Validate a plans file against this binary's modules and services.
     Check {
+        /// Server config: with it, pools named by modules and plans served by
+        /// listeners are checked too.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Plans file.
         #[arg(long, default_value = "plans.toml")]
         plans: PathBuf,
@@ -69,12 +75,20 @@ pub struct App {
     registry: Arc<Registry>,
     kinds: ServiceKinds,
     services: ServiceRegistry,
+    /// Thread pools from `server.toml`, set once when `serve` starts and kept
+    /// for every reload.
+    pools: std::sync::OnceLock<BTreeMap<String, Pool>>,
 }
 
 impl App {
     /// An app with these modules, the built-in service kinds and no services.
     pub fn new(registry: Registry) -> Self {
-        Self { registry: Arc::new(registry), kinds: ServiceKinds::default(), services: ServiceRegistry::new() }
+        Self {
+            registry: Arc::new(registry),
+            kinds: ServiceKinds::default(),
+            services: ServiceRegistry::new(),
+            pools: std::sync::OnceLock::new(),
+        }
     }
 
     /// Replace the service kinds `services.toml` may use.
@@ -99,6 +113,9 @@ impl App {
     /// Build the service registry: code-registered services plus the file's.
     pub fn load_services(&self, services: Option<&Path>) -> Result<ServiceRegistry, String> {
         let mut registry = self.services.clone();
+        for (name, pool) in self.pools.get().into_iter().flatten() {
+            registry.insert_pool(name.clone(), pool.clone());
+        }
         if let Some(path) = services {
             let file = ServicesFile::load(path)?;
             self.kinds.build_into(&file, &mut registry).map_err(|v| v.join("\n"))?;
@@ -116,6 +133,79 @@ impl App {
         h.finish()
     }
 
+    /// Run every check `serve` runs at startup (graph rules, modules, module
+    /// config, services, key types, data flow) without serving. Returns the
+    /// number of plans and services, or every problem found, one per line.
+    ///
+    /// With `config` (`server.toml`), it also builds that config's thread
+    /// pools, so a module asking for a pool that isn't configured fails, and
+    /// checks that every plan a listener serves exists. Without it, a module
+    /// that asks for a pool fails the check.
+    ///
+    /// Works inside or outside a Tokio runtime; some clients (gRPC channels)
+    /// need one to be built, so one is started if none is running.
+    pub fn check_files(
+        &self,
+        config: Option<&Path>,
+        plans: &Path,
+        services: Option<&Path>,
+    ) -> Result<(usize, usize), Vec<String>> {
+        // Engine diagnostics come one per line; config checks join theirs with "; ".
+        let lines = |e: String| -> Vec<String> {
+            e.lines().flat_map(|l| l.split("; ")).map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
+        };
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(_) => None,
+            Err(_) => Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| vec![format!("cannot start the runtime: {e}")])?,
+            ),
+        };
+        let _entered = runtime.as_ref().map(tokio::runtime::Runtime::enter);
+        let Some(config) = config else {
+            let engine = self.load_engine(plans, services).map_err(lines)?;
+            let snapshot = engine.snapshot();
+            return Ok((snapshot.plans.len(), snapshot.services.len()));
+        };
+        let config = ServerConfig::load(config).map_err(lines)?;
+        let pools = config.build_pools().map_err(lines)?;
+        let file = PlansFile::load(plans).map_err(|e| lines(e.to_string()))?;
+        let mut registry = self.load_services(services).map_err(lines)?;
+        for (name, pool) in &pools {
+            registry.insert_pool(name.clone(), pool.clone());
+        }
+        let engine = Engine::with_services(self.registry.clone(), &file, Arc::new(registry))
+            .map_err(|d| lines(d.to_string()))?;
+        config.validate(&engine).map_err(lines)?;
+        let snapshot = engine.snapshot();
+        Ok((snapshot.plans.len(), snapshot.services.len()))
+    }
+
+    /// For a test: panic, listing every problem, unless the files pass
+    /// [`App::check_files`]. Build the `App` exactly as `main` does, so the
+    /// test checks what the binary will serve:
+    ///
+    /// ```ignore
+    /// #[test]
+    /// fn shipped_plans_pass_every_check() {
+    ///     App::new(my_service::registry().unwrap()).assert_files_valid(
+    ///         Some(Path::new("server.toml")),
+    ///         "plans.toml",
+    ///         Some(Path::new("services.toml")),
+    ///     );
+    /// }
+    /// ```
+    #[track_caller]
+    #[allow(clippy::panic, reason = "a test assertion: failing loudly is its job, like `assert!`")]
+    pub fn assert_files_valid(&self, config: Option<&Path>, plans: impl AsRef<Path>, services: Option<&Path>) {
+        let plans = plans.as_ref();
+        if let Err(problems) = self.check_files(config, plans, services) {
+            panic!("{} fails the plan check:\n  {}", plans.display(), problems.join("\n  "));
+        }
+    }
+
     /// Re-read the plans and services files and swap a new snapshot into `engine`.
     pub fn reload(&self, engine: &Engine, plans: &Path, services: Option<&Path>) -> Result<u64, String> {
         let file = PlansFile::load(plans).map_err(|e| e.to_string())?;
@@ -127,33 +217,19 @@ impl App {
     /// Parse the command line and run it.
     pub fn run(self) -> ExitCode {
         match Cli::parse().command {
-            Command::Check { plans, services } => self.check(&plans, services.as_deref()),
+            Command::Check { config, plans, services } => self.check(config.as_deref(), &plans, services.as_deref()),
             Command::Serve { config, plans, services } => Arc::new(self).serve(&config, &plans, services),
         }
     }
 
-    fn check(&self, plans: &Path, services: Option<&Path>) -> ExitCode {
-        // Some clients (gRPC channels) need a runtime to be built.
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => {
-                eprintln!("error: cannot start the runtime: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        match runtime.block_on(async { self.load_engine(plans, services) }) {
-            Ok(engine) => {
-                let snapshot = engine.snapshot();
-                println!(
-                    "ok: {} ({} plans, {} services)",
-                    plans.display(),
-                    snapshot.plans.len(),
-                    snapshot.services.len()
-                );
+    fn check(&self, config: Option<&Path>, plans: &Path, services: Option<&Path>) -> ExitCode {
+        match self.check_files(config, plans, services) {
+            Ok((plans_count, services_count)) => {
+                println!("ok: {} ({plans_count} plans, {services_count} services)", plans.display());
                 ExitCode::SUCCESS
             }
-            Err(e) => {
-                for line in e.lines() {
+            Err(problems) => {
+                for line in problems {
                     eprintln!("error: {line}");
                 }
                 ExitCode::FAILURE
@@ -169,6 +245,15 @@ impl App {
                 return ExitCode::FAILURE;
             }
         };
+        match config.build_pools() {
+            Ok(pools) => {
+                let _ = self.pools.set(pools);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.enable_all();
         if let Some(n) = config.runtime.worker_threads {
@@ -185,7 +270,9 @@ impl App {
             }
         };
         let plans = plans.to_path_buf();
-        runtime.block_on(async move {
+        let drain = std::time::Duration::from_millis(config.shutdown.drain_timeout_ms);
+        let app = self.clone();
+        let code = runtime.block_on(async move {
             let telemetry = telemetry::init(&config.telemetry);
             let metrics = Some(telemetry::metrics_registry());
             let engine = match self.build_engine(&config, &plans, services.as_deref()) {
@@ -236,7 +323,14 @@ impl App {
             };
             telemetry.shutdown();
             code
-        })
+        });
+        // Outside the runtime: shutting a pool down waits on its threads.
+        for (name, pool) in app.pools.get().into_iter().flatten() {
+            if !pool.shutdown(drain) {
+                eprintln!("warning: pool `{name}` still had jobs running after the drain timeout");
+            }
+        }
+        code
     }
 
     fn build_engine(&self, config: &ServerConfig, plans: &Path, services: Option<&Path>) -> Result<Engine, String> {

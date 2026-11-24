@@ -697,6 +697,7 @@ dependencies = [
  "bytes",
  "fixedbitset",
  "http",
+ "prometheus-client",
  "serde",
  "thiserror",
  "tokio",

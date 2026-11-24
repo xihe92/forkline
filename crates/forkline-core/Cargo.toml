@@ -10,9 +10,10 @@ publish.workspace = true
 bytes.workspace = true
 fixedbitset.workspace = true
 http.workspace = true
+prometheus-client.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time", "rt"] }
+tokio = { workspace = true, features = ["time", "rt", "sync", "macros"] }
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true

@@ -66,6 +66,24 @@ see "Before 1.0.0" for what remains.
 - Outbound gRPC calls send `grpc-timeout` with the time left before the
   request's deadline, computed again on each retry. `GrpcRequest` has a new
   `deadline` field, so code that builds one must set it.
+- `App::check_files` runs every check `serve` runs at startup without
+  serving, inside or outside a Tokio runtime, and `App::assert_files_valid`
+  turns it into a test assertion, so a broken plan fails `cargo test`. The
+  `check` command now uses it; both examples test their shipped plans this way.
+- Named thread pools: `[pools.<name>]` in `server.toml` (`threads`, default
+  one per core; `queue`, default 1024) creates a fixed pool with a bounded
+  queue at startup. Modules get one with `cx.pool(name)` while they are built,
+  so a missing pool rejects the plan at load, and run work with `Pool::run`,
+  which waits without holding a worker thread, stops waiting at the deadline
+  or on cancellation, skips jobs whose request gave up while queued, survives
+  panics, and refuses at once when the queue is full. Pools drain at shutdown
+  and report `forkline_pool_*` metrics.
+- `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
+  for work refused because a resource is full, such as a pool's queue.
+- `check --config server.toml`, and a `config` argument on `App::check_files`
+  and `App::assert_files_valid`: with it, plans are also checked against the
+  configured pools and the plans the listeners serve. Both examples pass their
+  `server.toml`.
 
 ### Fixes after rc.1
 - A reload or rollback that removes a plan a listener serves is now rejected

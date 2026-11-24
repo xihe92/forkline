@@ -45,6 +45,12 @@ impl<'a> BuildContext<'a> {
         self.services.get::<T>(name).map_err(|e| BuildError::msg(e.to_string()))
     }
 
+    /// Resolve a thread pool configured under `[pools.<name>]` in
+    /// `server.toml`. A missing pool rejects the plan at load time.
+    pub fn pool(&self, name: &str) -> Result<crate::Pool, BuildError> {
+        self.services.pool(name).map_err(|e| BuildError::msg(e.to_string()))
+    }
+
     /// All services.
     pub fn services(&self) -> &'a ServiceRegistry {
         self.services

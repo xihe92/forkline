@@ -36,6 +36,10 @@
 //!
 //! [shutdown]
 //! drain_timeout_ms = 10000        # in-flight requests, then detached paths
+//!
+//! [pools.scoring]                 # a thread pool modules reach with cx.pool("scoring")
+//! threads = 4                     # default: one per core
+//! queue = 1000                    # jobs that may wait; more are refused (default 1024)
 //! ```
 
 use std::collections::BTreeMap;
@@ -74,6 +78,9 @@ pub struct ServerConfig {
     /// Reload behaviour.
     #[serde(default)]
     pub reload: ReloadConfig,
+    /// Thread pools for blocking or CPU-heavy module work, by name.
+    #[serde(default)]
+    pub pools: std::collections::BTreeMap<String, PoolConfig>,
 }
 
 /// One length-delimited TCP listener: every frame is a request to `plan`.
@@ -152,6 +159,23 @@ impl Default for ReloadConfig {
     fn default() -> Self {
         Self { history: default_history(), watch_interval_ms: 0 }
     }
+}
+
+/// One thread pool: a fixed number of threads and a bounded queue. Created
+/// when the server starts; changing it needs a restart.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolConfig {
+    /// Threads; default one per core.
+    pub threads: Option<usize>,
+    /// Jobs that may wait for a thread; a job beyond this is refused with
+    /// `Overloaded` (HTTP 503).
+    #[serde(default = "default_pool_queue")]
+    pub queue: usize,
+}
+
+fn default_pool_queue() -> usize {
+    1024
 }
 
 /// Shutdown behaviour.
@@ -274,6 +298,27 @@ impl ServerConfig {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         Self::from_toml_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Check the `[pools.*]` settings and start every pool's threads.
+    pub fn build_pools(&self) -> Result<std::collections::BTreeMap<String, forkline_core::Pool>, String> {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let mut problems = Vec::new();
+        for (name, p) in &self.pools {
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                problems.push(format!("pools: `{name}` must be letters, digits, `_` or `-`"));
+            }
+            if p.threads == Some(0) || p.queue == 0 {
+                problems.push(format!("pools.{name}: threads and queue must be at least 1"));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(problems.join("; "));
+        }
+        self.pools
+            .iter()
+            .map(|(name, p)| Ok((name.clone(), forkline_core::Pool::new(name, p.threads.unwrap_or(cores), p.queue)?)))
+            .collect()
     }
 
     /// Every plan a route, method or TCP listener serves.

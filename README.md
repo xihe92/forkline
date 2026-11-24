@@ -163,10 +163,33 @@ Every problem in a plan is reported at once, and a plan with any problem is
 rejected whole:
 
 ```sh
-forkline-horoscope check --plans plans.toml --services services.toml   # every check
+forkline-horoscope check --config server.toml --plans plans.toml --services services.toml   # every check
 forkline-echo check --plans plans.toml   # full check with this binary's modules
 forkline-plan check plans.toml           # graph rules only, no modules needed
 ```
+
+Plans are data, so `cargo build` doesn't read them. To catch a broken plan
+before it reaches a server, add a test that runs the same full check, with the
+`App` built exactly as `main` builds it; `cargo test` then fails on any plan
+problem `serve` would reject:
+
+```rust
+// tests/plans.rs
+use std::path::Path;
+use forkline_server::cli::App;
+
+#[test]
+fn shipped_plans_pass_every_check() {
+    App::new(my_service::registry().unwrap()).assert_files_valid(
+        Some(Path::new("server.toml")),     // also checks pools and the plans listeners serve
+        "plans.toml",
+        Some(Path::new("services.toml")),
+    );
+}
+```
+
+Backends need not be running: clients connect lazily. Both examples have this
+test.
 
 ## Services
 
@@ -197,6 +220,58 @@ impl Build for HoroscopeLookup {
 ```
 
 HTTPS needs the `tls` feature of `forkline-services`.
+
+## Blocking work and thread pools
+
+Modules run on Tokio's worker threads (one per core by default), which every
+request shares in short turns. Work that waits should use an async API and
+`.await`, which frees the thread. Synchronous work that takes more than about a
+millisecond, or a synchronous call that waits (a non-async database driver,
+`std::fs`), must leave the worker threads, or every request queued behind it
+waits too. Two ways:
+
+* `cx.blocking(move || work())`: Tokio's shared blocking pool, no setup.
+* A named pool from `server.toml`, for isolation and sizing: a fixed number of
+  threads and a bounded queue, created when the server starts.
+
+```toml
+[pools.scoring]
+threads = 4      # default: one per core
+queue = 1000     # jobs that may wait; more are refused (default 1024)
+```
+
+```rust
+impl Build for Rank {
+    type Config = RankConfig;
+    fn build_with(config: RankConfig, cx: &BuildContext<'_>) -> Result<Self, BuildError> {
+        Ok(Self { scoring: cx.pool("scoring")? })   // a missing pool rejects the plan at load
+    }
+}
+
+impl Module for Rank {
+    type Io<'a> = RankIo<'a>;
+    async fn call(&self, cx: &Ctx, mut io: RankIo<'_>) -> Result<(), NodeError> {
+        let candidates = io.candidates().cloned().unwrap_or_default();
+        let scores = self.scoring.run(cx, move || score(&candidates)).await?;
+        io.set_scores(scores);
+        Ok(())
+    }
+}
+```
+
+`Pool::run` waits without holding a worker thread. A full queue fails at once
+with `Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4). The wait
+ends at the request's deadline or on cancellation; a job already running can't
+be stopped and finishes, while one still queued is skipped. A panic fails the
+job, not the thread. `/metrics` has `forkline_pool_threads`, `_queued`, `_busy`,
+`_jobs_total{result="done|refused|panicked|skipped"}` and `_wait_seconds`.
+
+Pools live in `server.toml`, so changing one needs a restart; at shutdown each
+pool finishes its queue within `drain_timeout_ms`. Run `check` with
+`--config server.toml` (or pass it to `assert_files_valid`) so plans are
+checked against the configured pools and listeners. In a module test, give
+the harness a registry holding the pool:
+`ServiceRegistry::new().with_pool("scoring", Pool::new("scoring", 2, 16)?)`.
 
 ## Testing modules
 

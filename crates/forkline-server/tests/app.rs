@@ -103,3 +103,33 @@ fn loading_reports_file_problems() {
     );
     assert!(app.load_engine(&plans, Some(Path::new(&dir.write("s.toml", "")))).is_ok(), "an empty file is fine");
 }
+
+#[test]
+fn check_files_runs_every_check_outside_a_runtime() {
+    let dir = Dir::new("check-ok");
+    let plans = dir.write("plans.toml", &plan("-ok"));
+    // A gRPC channel needs a Tokio runtime to be built, and none is running here.
+    let services = dir.write("services.toml", "[services.backend]\nkind = \"grpc\"\nurl = \"http://127.0.0.1:9\"\n");
+    let app = App::new(modules()).service("from_code", 7u32);
+    assert_eq!(app.check_files(None, &plans, Some(&services)), Ok((1, 2)));
+    app.assert_files_valid(None, &plans, Some(&services));
+}
+
+#[tokio::test]
+async fn check_files_reports_every_problem_inside_a_runtime() {
+    let dir = Dir::new("check-bad");
+    // Two problems at once: an unknown module, and a config field the module doesn't take.
+    let text = plan("-x").replace("BodyDecoder", "Nope").replace("suffix =", "sufix =");
+    let plans = dir.write("plans.toml", &text);
+    let problems = App::new(modules()).check_files(None, &plans, None).unwrap_err();
+    assert!(problems.iter().any(|p| p.contains("module `Nope` is not registered")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("sufix")), "{problems:?}");
+}
+
+#[test]
+#[should_panic(expected = "fails the plan check:\n  plan `p`, node `decode`: module `Nope` is not registered")]
+fn assert_files_valid_panics_with_the_problems() {
+    let dir = Dir::new("check-panic");
+    let plans = dir.write("plans.toml", &plan("-x").replace("BodyDecoder", "Nope"));
+    App::new(modules()).assert_files_valid(None, &plans, None);
+}
