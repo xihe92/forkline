@@ -104,6 +104,10 @@ see "Before 1.0.0" for what remains.
   instead of `Internal`.
 - HTTP listeners take `max_body_bytes` (default 2 MiB, axum's previous
   implicit limit); larger bodies get 413.
+- A TCP listener kept its listening socket open while draining, so the
+  kernel went on accepting connections that were never served. It now closes
+  as soon as shutdown starts, like the HTTP and gRPC listeners (found by the
+  listener contract suite).
 
 ### Tests after rc.1
 - Engine: failing and panicking joins, panics in every node kind including

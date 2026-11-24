@@ -84,6 +84,9 @@ pub(crate) async fn serve(
             },
         }
     }
+    // Close the listening socket now: while it stays open the kernel keeps
+    // accepting connections that would never be served.
+    drop(listener);
     connections.close();
     connections.wait().await;
     Ok(())
