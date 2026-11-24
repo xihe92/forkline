@@ -7,37 +7,9 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use common::{detached_plan, grpc_call, marks, plans, read_frame, registry, send_frame, start};
+use common::{detached_plan, marks, plans, registry, start};
 use forkline_engine::Engine;
 use forkline_server::{BoundServer, Hooks, Reloader, ServerConfig, ServerError};
-use tonic::Code;
-
-#[tokio::test]
-async fn the_drain_timeout_cuts_off_grpc_and_tcp_requests_too() {
-    let engine = Arc::new(Engine::new(registry(), &plans(&[("p", "", 0, 60_000)])).unwrap());
-    let s = start(
-        "[[grpc]]\naddr = \"127.0.0.1:0\"\nmethods = { P = \"p\" }\n[[tcp]]\naddr = \"127.0.0.1:0\"\nplan = \"p\"\n\
-         [shutdown]\ndrain_timeout_ms = 200\n",
-        engine,
-        Hooks::default(),
-    )
-    .await;
-    let grpc = tokio::spawn(grpc_call(s.grpc(), "P", "30000|never"));
-    let mut conn = s.tcp().await;
-    send_frame(&mut conn, b"30000|never").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let started = Instant::now();
-    s.shutdown.cancel();
-
-    let status = grpc.await.unwrap().unwrap_err();
-    assert_eq!((status.code(), status.message()), (Code::Unavailable, "shutting down"));
-    assert_eq!(read_frame(&mut conn).await.unwrap(), (4, Bytes::from("shutting down")));
-    drop(conn);
-    s.finish().await;
-    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
-}
 
 #[tokio::test]
 async fn shutdown_waits_for_detached_paths() {

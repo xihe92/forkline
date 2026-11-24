@@ -296,7 +296,8 @@ pub struct Addrs {
 pub struct Running {
     pub addrs: Addrs,
     pub shutdown: CancellationToken,
-    pub task: tokio::task::JoinHandle<Result<(), ServerError>>,
+    /// The server; `None` once [`Running::server_stopped`] has awaited it.
+    pub task: Option<tokio::task::JoinHandle<Result<(), ServerError>>>,
     leaks: LeakCheck,
 }
 
@@ -326,7 +327,7 @@ pub async fn start(config: &str, engine: Arc<Engine>, hooks: Hooks) -> Running {
     }
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(server.run(shutdown.clone()));
-    Running { addrs, shutdown, task, leaks }
+    Running { addrs, shutdown, task: Some(task), leaks }
 }
 
 /// How long the leak checks wait for things to settle.
@@ -451,15 +452,24 @@ impl Running {
 
     /// For tests that cancel `shutdown` themselves: wait for the server to
     /// end, then check that nothing leaked.
-    pub async fn finish(self) {
-        self.task.await.unwrap().unwrap();
+    pub async fn finish(mut self) {
+        self.server_stopped().await;
         settle("after shutdown", || self.leaks.held()).await;
+    }
+
+    /// Wait for the server to return (after `shutdown` was cancelled),
+    /// without the leak checks: for timing shutdown while clients still hold
+    /// connections. Call [`finish`](Self::finish) once they are dropped.
+    pub async fn server_stopped(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.await.unwrap().unwrap();
+        }
     }
 
     /// Stop without the leak checks, for a test that leaves work running on
     /// purpose. Say why where it is used.
-    pub async fn stop_unchecked(self) {
+    pub async fn stop_unchecked(mut self) {
         self.shutdown.cancel();
-        self.task.await.unwrap().unwrap();
+        self.server_stopped().await;
     }
 }

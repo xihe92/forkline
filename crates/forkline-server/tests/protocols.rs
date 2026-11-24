@@ -1,6 +1,6 @@
-//! What each protocol answers for every outcome: success, bad request,
-//! module failure, panic, deadline, unknown route, overload. Plus the HTTP
-//! body limit and the TCP adapter's connection handling.
+//! Protocol-specific behaviour the listener contract suite (`contract.rs`)
+//! doesn't cover: the TCP adapter's owed responses, abandoned pipelines and
+//! in-flight limit, a failing error node, and gRPC's own deadline handling.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 mod common;
@@ -19,119 +19,6 @@ const ALL_LISTENERS: &str = "[[http]]\naddr = \"127.0.0.1:0\"\nroutes = { \"/p\"
 
 fn engine(budget_ms: u64) -> Arc<Engine> {
     Arc::new(Engine::new(registry(), &plans(&[("p", "", 0, budget_ms)])).unwrap())
-}
-
-#[tokio::test]
-async fn http_answers_each_outcome_with_its_status() {
-    let s = start(ALL_LISTENERS, engine(100), Hooks::default()).await;
-    let c = reqwest::Client::new();
-    let post = |body: &'static str| c.post(s.http("/p")).body(body).send();
-    let cases = [
-        ("ok", 200, "ok"),
-        ("bad", 400, "bad input"),
-        ("fail", 500, "module failed"),
-        ("panic", 500, "panicked: module panicked"),
-        ("300|slow", 504, "deadline passed while the node was running"),
-    ];
-    for (body, status, text) in cases {
-        let res = post(body).await.unwrap();
-        assert_eq!(res.status(), status, "{body}");
-        assert_eq!(res.text().await.unwrap(), text, "{body}");
-    }
-
-    assert_eq!(c.put(s.http("/p")).body("x").send().await.unwrap().status(), 405, "only GET and POST");
-    assert_eq!(c.post(s.http("/nope")).body("x").send().await.unwrap().status(), 404);
-    let res = c.post(s.http("/p")).body(vec![b'x'; 65]).send().await.unwrap();
-    assert_eq!(res.status(), 413, "over max_body_bytes");
-    assert_eq!(c.post(s.http("/p")).body(vec![b'x'; 64]).send().await.unwrap().status(), 200, "at the limit");
-    drop(c);
-    s.stop().await;
-}
-
-#[tokio::test]
-async fn grpc_answers_each_outcome_with_its_code() {
-    let s = start(ALL_LISTENERS, engine(100), Hooks::default()).await;
-    assert_eq!(grpc_call(s.grpc(), "P", "ok").await.unwrap(), Bytes::from("ok"));
-    let cases = [
-        ("bad", Code::InvalidArgument, "bad input"),
-        ("fail", Code::Internal, "module failed"),
-        ("panic", Code::Internal, "panicked: module panicked"),
-        ("300|slow", Code::DeadlineExceeded, "deadline passed while the node was running"),
-    ];
-    for (body, code, message) in cases {
-        let status = grpc_call(s.grpc(), "P", body).await.unwrap_err();
-        assert_eq!((status.code(), status.message()), (code, message), "{body}");
-    }
-    let status = grpc_call(s.grpc(), "Nope", "x").await.unwrap_err();
-    assert_eq!(status.code(), Code::Unimplemented);
-    assert_eq!(status.message(), "no plan is mapped to /forkline.v1.Plans/Nope");
-    s.stop().await;
-}
-
-#[tokio::test]
-async fn tcp_answers_each_outcome_with_its_status_byte() {
-    let s = start(ALL_LISTENERS, engine(100), Hooks::default()).await;
-    let mut conn = s.tcp().await;
-    let cases: [(&[u8], u8, &str); 5] = [
-        (b"ok", 0, "ok"),
-        (b"bad", 1, "bad input"),
-        (b"fail", 2, "module failed"),
-        (b"panic", 2, "panicked: module panicked"),
-        (b"300|slow", 3, "deadline passed while the node was running"),
-    ];
-    for (body, status, text) in cases {
-        send_frame(&mut conn, body).await;
-        assert_eq!(read_frame(&mut conn).await.unwrap(), (status, Bytes::from(text)), "{body:?}");
-    }
-    drop(conn);
-    s.stop().await;
-}
-
-#[tokio::test]
-async fn admission_refuses_on_every_protocol_and_recovers() {
-    let config = format!("{ALL_LISTENERS}[admission]\nred = 2\ngreen = 1\n");
-    let s = start(&config, engine(5000), Hooks::default()).await;
-    let c = reqwest::Client::new();
-    // Two slow requests fill the server (red = 2).
-    let slow: Vec<_> = (0..2).map(|_| tokio::spawn(c.post(s.http("/p")).body("400|slow").send())).collect();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let status = grpc_call(s.grpc(), "P", "x").await.unwrap_err();
-    assert_eq!((status.code(), status.message()), (Code::ResourceExhausted, "overloaded"));
-    let mut conn = s.tcp().await;
-    send_frame(&mut conn, b"x").await;
-    assert_eq!(read_frame(&mut conn).await.unwrap(), (4, Bytes::from("overloaded")));
-    let res = c.post(s.http("/p")).body("x").send().await.unwrap();
-    assert_eq!(res.status(), 503);
-    assert_eq!(res.headers()["retry-after"], "1");
-
-    for r in slow {
-        assert_eq!(r.await.unwrap().unwrap().status(), 200);
-    }
-    // Back under green: everything is admitted again.
-    assert_eq!(grpc_call(s.grpc(), "P", "x").await.unwrap(), Bytes::from("x"));
-    send_frame(&mut conn, b"y").await;
-    assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("y")));
-    drop(c);
-    drop(conn);
-    s.stop().await;
-}
-
-#[tokio::test]
-async fn a_client_that_disconnects_frees_its_admission_slot() {
-    let config = "[[http]]\naddr = \"127.0.0.1:0\"\nroutes = { \"/p\" = \"p\" }\n[admission]\nred = 2\ngreen = 1\n";
-    let s = start(config, engine(5000), Hooks::default()).await;
-    let impatient = reqwest::Client::builder().timeout(Duration::from_millis(100)).build().unwrap();
-    for _ in 0..2 {
-        assert!(impatient.post(s.http("/p")).body("2000|x").send().await.unwrap_err().is_timeout());
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // Had the abandoned requests kept their slots, these would be refused.
-    let c = reqwest::Client::new();
-    let (a, b) = tokio::join!(c.post(s.http("/p")).body("50|a").send(), c.post(s.http("/p")).body("50|b").send());
-    assert_eq!((a.unwrap().status().as_u16(), b.unwrap().status().as_u16()), (200, 200));
-    drop(c);
-    s.stop().await;
 }
 
 #[tokio::test]

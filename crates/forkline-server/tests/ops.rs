@@ -280,31 +280,6 @@ async fn shutdown_lets_in_flight_requests_finish_and_flips_readiness() {
 }
 
 #[tokio::test]
-async fn the_drain_timeout_bounds_shutdown() {
-    let engine = Arc::new(Engine::new(registry(), &plans(&[("p", "", 0, 60_000)])).unwrap());
-    let s = start(
-        "[[http]]\naddr = \"127.0.0.1:0\"\nroutes = { \"/p\" = \"p\" }\n[shutdown]\ndrain_timeout_ms = 200\n",
-        engine,
-        Hooks::default(),
-    )
-    .await;
-    let c = reqwest::Client::new();
-    let stuck = tokio::spawn({
-        let (c, url) = (c.clone(), s.http("/p"));
-        async move { c.post(url).body("30000|never").send().await }
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let started = Instant::now();
-    s.shutdown.cancel();
-    let res = stuck.await.unwrap().unwrap();
-    assert_eq!(res.status(), 503, "the stuck request was cut off");
-    assert_eq!(res.text().await.unwrap(), "shutting down");
-    drop(c);
-    s.finish().await;
-    assert!(started.elapsed() < Duration::from_millis(1000), "{:?}", started.elapsed());
-}
-
-#[tokio::test]
 async fn http_routes_accept_get_and_pass_the_query_string() {
     let engine = Arc::new(Engine::new(registry(), &plans(&[("p", "-a", 0, 1000)])).unwrap());
     let s = start("[[http]]\naddr = \"127.0.0.1:0\"\nroutes = { \"/p\" = \"p\" }\n", engine, Hooks::default()).await;

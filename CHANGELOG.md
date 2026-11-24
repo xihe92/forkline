@@ -160,6 +160,23 @@ see "Before 1.0.0" for what remains.
   checks that no task outlives its requests, and so does each generated plan
   in the scheduling property test. Checked by leaking an admission slot, a
   task and a socket on purpose: each fails the suite.
+- Listener contract suite (`crates/forkline-server/tests/contract.rs`): one
+  client over HTTP, gRPC and TCP runs the same cases on every listener, as
+  Spring runs one suite on Tomcat, Jetty and Netty. Outcomes; admission;
+  a client leaving mid-request; a request in flight at shutdown completing,
+  one past the drain timeout cut off, idle and silent connections not
+  holding up shutdown, a stop racing startup, new connections refused while
+  draining; body, message, frame and header limits; silent, trickling and
+  idle clients; HTTP request smuggling (both lengths, two lengths, bad
+  chunks, bad methods and header names), garbage HTTP/2 frames, HTTP/1 and
+  non-gRPC requests on the gRPC port, truncated and empty TCP frames;
+  keep-alive, h2c and TCP half-close. The per-protocol outcome, admission and
+  drain cut-off tests moved into it. It found the TCP listener accepting
+  while draining and the missing gRPC and TCP idle timeouts. Two behaviours
+  are by design and documented in the tests: a request with both
+  Content-Length and Transfer-Encoding is read by Transfer-Encoding and the
+  connection then closed (RFC 9112 6.3), and a TCP request whose client left
+  runs to its end, since a closed and a half-closed connection look the same.
 
 ### Before 1.0.0
 - Choose a licence (plan decision 8) and set `license` and `publish`.
