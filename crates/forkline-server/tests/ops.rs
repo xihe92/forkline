@@ -90,6 +90,7 @@ async fn a_reload_under_full_load_drops_zero_requests() {
     assert!(ok >= 1000, "{ok}");
     assert!(seen_a.load(Ordering::Relaxed) > 0 && seen_b.load(Ordering::Relaxed) > 0);
     assert_eq!(engine.snapshot().version, reloads + 1);
+    drop(client);
     s.stop().await;
 }
 
@@ -160,6 +161,7 @@ async fn at_twice_the_admission_limit_admitted_requests_stay_in_budget_and_the_r
     // Admission resumes once the load is gone.
     let c = &clients[0];
     assert_eq!(c.post(s.http("/slow")).body("y").send().await.unwrap().status(), 200);
+    drop(clients);
     s.stop().await;
 }
 
@@ -207,6 +209,7 @@ async fn the_admin_api() {
     let res = c.post(s.admin("/admin/rollback")).send().await.unwrap();
     assert_eq!(res.text().await.unwrap(), r#"{"version":1}"#);
     assert_eq!(c.post(s.http("/p")).body("x").send().await.unwrap().text().await.unwrap(), "x-a");
+    drop(c);
     s.stop().await;
 }
 
@@ -246,6 +249,7 @@ async fn the_tcp_adapter_pipelines_in_order_and_maps_statuses() {
     // An oversize frame closes the connection.
     send_frame(&mut conn, &[b'x'; 100]).await;
     assert!(read_frame(&mut conn).await.is_none());
+    drop(conn);
     s.stop().await;
 }
 
@@ -269,7 +273,8 @@ async fn shutdown_lets_in_flight_requests_finish_and_flips_readiness() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(c.get(s.admin("/readyz")).send().await.unwrap().status(), 503, "not ready while draining");
     assert_eq!(slow.await.unwrap(), "late", "the in-flight request finished");
-    s.task.await.unwrap().unwrap();
+    drop(c);
+    s.finish().await;
 }
 
 #[tokio::test]
@@ -289,11 +294,12 @@ async fn the_drain_timeout_bounds_shutdown() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let started = Instant::now();
     s.shutdown.cancel();
-    s.task.await.unwrap().unwrap();
-    assert!(started.elapsed() < Duration::from_millis(1000), "{:?}", started.elapsed());
     let res = stuck.await.unwrap().unwrap();
     assert_eq!(res.status(), 503, "the stuck request was cut off");
     assert_eq!(res.text().await.unwrap(), "shutting down");
+    drop(c);
+    s.finish().await;
+    assert!(started.elapsed() < Duration::from_millis(1000), "{:?}", started.elapsed());
 }
 
 #[tokio::test]
@@ -311,5 +317,6 @@ async fn http_routes_accept_get_and_pass_the_query_string() {
 
     let res = client.put(s.http("/p")).body("x").send().await.unwrap();
     assert_eq!(res.status(), 405);
+    drop(client);
     s.stop().await;
 }

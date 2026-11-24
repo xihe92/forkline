@@ -1,6 +1,8 @@
 //! Phase 2: forks, branches, joins, merge rules, cancellation, panics, detached paths.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -426,6 +428,7 @@ async fn the_guide_merge_example_with_drop() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Ok, "{}", body(&reply));
     assert_eq!(body(&reply), "a=5 f=2 g=3");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -434,6 +437,7 @@ async fn the_guide_merge_example_with_error() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::MergeConflict));
     assert_eq!(body(&reply), "join: keys changed on more than one path: e");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -452,6 +456,7 @@ async fn fork_paths_run_concurrently() {
     let reply = call(&e).await;
     assert_eq!(body(&reply), "m=1 n=2");
     assert_eq!(started.elapsed(), Duration::from_millis(50), "not 100 ms: the paths overlapped");
+    support::assert_settled().await;
 }
 
 /// The guide's stage 3 shape: a fork whose second path branches, all meeting at one join.
@@ -485,6 +490,7 @@ fn stage3(label: &str) -> Engine {
 async fn a_branch_runs_only_the_chosen_path_and_the_join_waits_for_the_live_ones() {
     assert_eq!(body(&call(&stage3("horoscope")).await), "k=1 m=2");
     assert_eq!(body(&call(&stage3("stock")).await), "k=1 n=3");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -492,6 +498,7 @@ async fn an_unknown_branch_label_fails_the_request() {
     let reply = call(&stage3("weather")).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Module));
     assert!(body(&reply).starts_with("branch: returned unknown label `weather`"), "{}", body(&reply));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -518,6 +525,7 @@ async fn a_multibranch_runs_the_chosen_set() {
         "#,
     );
     assert_eq!(body(&call(&e).await), "k=1 n=3");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -538,6 +546,7 @@ async fn a_join_that_is_done_cancels_the_remaining_paths() {
     assert_eq!(started.elapsed(), Duration::from_millis(10));
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(count("done-slow"), 0, "the slow path was cancelled, not left running");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -558,6 +567,7 @@ async fn panics_are_isolated() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Panic));
     assert_eq!(body(&reply), "decode: panicked: decode boom");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -578,6 +588,7 @@ async fn a_failing_path_cancels_its_siblings() {
     assert_eq!(started.elapsed(), Duration::from_millis(5));
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(count("sibling-slow"), 0);
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -596,6 +607,7 @@ async fn the_deadline_covers_parallel_paths() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Deadline), "{}", body(&reply));
     assert_eq!(started.elapsed(), Duration::from_millis(30));
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -619,6 +631,7 @@ async fn detached_paths_do_not_delay_the_reply_and_are_tracked() {
     e.wait_detached().await;
     assert_eq!(count("detached-side"), 1);
     assert_eq!(started.elapsed(), Duration::from_millis(200));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -636,6 +649,7 @@ async fn a_branch_into_a_dead_end_is_reported() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Internal));
     assert_eq!(body(&reply), "p: no running path can reach the encode node");
+    support::assert_settled().await;
 }
 
 /// decode forks into A and B; A writes k then forks into A1 and A2, which meet
@@ -674,6 +688,7 @@ async fn nested_forks_merge_against_the_right_base() {
     assert_eq!(body(&call(&nested("\"p\"")).await), "k=1 m=2 n=3 p=4");
     // B also writes k: a conflict at j2 between A's prefix write and B.
     assert_eq!(body(&call(&nested("\"p\", \"k\"")).await), "m=2 n=3 p=4");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -702,6 +717,7 @@ async fn a_join_can_fork_again() {
         "#,
     );
     assert_eq!(body(&call(&e).await), "a=1 e=2 f=3 g=4");
+    support::assert_settled().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -714,6 +730,7 @@ async fn spawned_forks_give_the_same_result() {
     for _ in 0..50 {
         assert_eq!(body(&call(&e).await), "a=5 f=2 g=3");
     }
+    support::assert_settled().await;
 }
 
 // ---- Failure paths ----
@@ -736,6 +753,7 @@ async fn a_join_that_fails_or_panics_fails_the_request() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Panic));
     assert_eq!(body(&reply), "join: panicked: join boom");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -772,6 +790,7 @@ async fn panics_in_branches_and_the_encoder_are_isolated() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Panic));
     assert_eq!(body(&reply), "encode: panicked: encode boom");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -793,6 +812,7 @@ async fn a_panicking_terminal_is_an_engine_error() {
         }
         other => panic!("unexpected {other:?}"),
     }
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -814,6 +834,7 @@ async fn detached_paths_are_cancelled_at_the_deadline() {
     tokio::time::sleep(Duration::from_secs(10)).await;
     assert_eq!(count("detached-too-slow"), 0, "the slow path never finished");
     assert_eq!(e.detached_running(), 0);
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -832,6 +853,7 @@ async fn a_multibranch_that_picks_nothing_fails_the_request() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Internal));
     assert_eq!(body(&reply), "p: no running path can reach the encode node");
+    support::assert_settled().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -852,6 +874,7 @@ async fn paths_that_finish_after_a_done_join_are_discarded() {
         let text = body(&call(&e).await);
         assert!(text == "k=1" || text == "m=2", "exactly one path is merged: {text}");
     }
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -869,6 +892,7 @@ async fn a_deadline_between_two_nodes_stops_the_next_one() {
     assert_eq!(reply.status, Status::Error(ErrorKind::Deadline));
     assert_eq!(body(&reply), "b: deadline passed before the node started");
     assert_eq!(count("after-deadline"), 0);
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -883,6 +907,7 @@ async fn an_error_caused_by_the_deadline_is_reported_as_a_deadline() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Deadline), "{}", body(&reply));
     assert_eq!(body(&reply), "call: deadline passed: backend call timed out");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -900,6 +925,7 @@ async fn a_request_cancelled_before_its_reply_is_reported_as_cancelled() {
     assert_eq!(reply.status, Status::Error(ErrorKind::Cancelled));
     assert_eq!(body(&reply), "p: the request was cancelled before a reply");
     assert_eq!(count("after-cancel"), 0);
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -916,6 +942,7 @@ async fn blocking_work_runs_off_the_runtime_and_its_panics_are_caught() {
     let reply = call(&e).await;
     assert_eq!(reply.status, Status::Error(ErrorKind::Internal));
     assert!(body(&reply).starts_with("b: blocking task failed:"), "{}", body(&reply));
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -941,4 +968,5 @@ async fn dropping_a_request_cancels_its_spawned_paths() {
     assert!(request.await.unwrap_err().is_cancelled());
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!((count("orphan-x"), count("orphan-y")), (0, 0), "spawned paths were aborted");
+    support::assert_settled().await;
 }

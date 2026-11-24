@@ -1,6 +1,8 @@
 //! Linear plan execution: success, module errors, deadlines, terminal failure, reload.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -160,6 +162,7 @@ async fn a_chain_runs_in_order() {
     let reply = e.call("p", Request::in_process("hi")).await.unwrap();
     assert_eq!(reply.status, Status::Ok);
     assert_eq!(reply.body, Bytes::from("hi-a-b"));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -168,6 +171,7 @@ async fn module_errors_reach_the_terminal() {
     let reply = e.call("p", Request::in_process("hi")).await.unwrap();
     assert_eq!(reply.status, Status::Error(ErrorKind::Module));
     assert_eq!(reply.body, Bytes::from("b: append failed on purpose"));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -176,6 +180,7 @@ async fn bad_requests_keep_their_kind() {
     let reply = e.call("p", Request::in_process("bad")).await.unwrap();
     assert_eq!(reply.status, Status::Error(ErrorKind::BadRequest));
     assert_eq!(reply.body, Bytes::from("decode: body must not be `bad`"));
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -186,6 +191,7 @@ async fn the_time_budget_is_enforced() {
     assert_eq!(reply.status, Status::Error(ErrorKind::Deadline));
     assert_eq!(reply.body, Bytes::from("b: deadline passed while the node was running"));
     assert_eq!(started.elapsed(), Duration::from_millis(100), "stopped exactly at the 100 ms budget");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -196,6 +202,7 @@ async fn an_earlier_inbound_deadline_wins() {
     let reply = e.call("p", req).await.unwrap();
     assert_eq!(reply.status, Status::Error(ErrorKind::Deadline));
     assert!(reply.body.starts_with(b"a: "));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -210,6 +217,7 @@ async fn a_failing_terminal_is_an_engine_error() {
         }
         other => panic!("unexpected {other:?}"),
     }
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -219,6 +227,7 @@ async fn unknown_plans_are_refused() {
         e.call("nope", Request::in_process("")).await,
         Err(EngineError::UnknownPlan(p)) if p == "nope"
     ));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -226,6 +235,7 @@ async fn the_plan_is_a_tower_service() {
     let e = Arc::new(engine(r#"{ suffix = "!" }"#, "{}"));
     let reply = e.plan_service("p").oneshot(Request::in_process("svc")).await.unwrap();
     assert_eq!(reply.body, Bytes::from("svc!"));
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -249,6 +259,7 @@ async fn reload_swaps_plans_and_in_flight_requests_keep_their_snapshot() {
     let broken = PlansFile::from_toml_str("[plans.p]\nroot = \"x\"\nterminal = \"y\"\nnodes = {}\n").unwrap();
     assert!(e.reload(&broken).is_err());
     assert_eq!(e.snapshot().version, 2);
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -278,6 +289,7 @@ async fn rollback_returns_to_the_previous_snapshot() {
     // A reload after a rollback gets a fresh version number.
     assert_eq!(e.reload(&plans("{}", "{}", "{}", 100)).unwrap(), 5);
     assert_eq!(e.snapshot().config_hash, 0xabc, "reload keeps the hash it was given last");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -298,6 +310,7 @@ async fn late_or_long_queued_requests_are_shed_before_any_module_runs() {
     // A fresh request runs (and fails in its module, proving it ran).
     let reply = e.call("p", Request::in_process("x")).await.unwrap();
     assert_eq!(reply.status, Status::Error(ErrorKind::Module));
+    support::assert_settled().await;
 }
 
 /// The same plan under another name.
@@ -328,4 +341,5 @@ async fn a_reload_or_rollback_may_not_remove_a_served_plan() {
     assert_eq!(e.rollback(), None, "the previous snapshot lacks `p`");
     assert_eq!(e.snapshot().version, 3);
     assert_eq!(e.history(), vec![1, 2], "the refused snapshot stays in the history");
+    support::assert_settled().await;
 }

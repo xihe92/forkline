@@ -375,6 +375,7 @@ proptest! {
         let reply = rt.block_on(async { engine.call("p", Request::in_process("")).await }).unwrap();
         let started_at_reply = STARTED.lock().unwrap().clone();
         rt.block_on(async { tokio::time::sleep(Duration::from_secs(60)).await });
+        prop_assert_eq!(rt.metrics().num_alive_tasks(), 0, "a task outlived its request\n{}", text);
         let started = STARTED.lock().unwrap().clone();
         let mut finished = FINISHED.lock().unwrap().clone();
         finished.sort_unstable();

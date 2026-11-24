@@ -1,6 +1,8 @@
 //! Subplans (`cx.execute_plan`) and services resolved at build time.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -164,6 +166,7 @@ async fn a_module_can_run_a_subplan() {
     let text = plan("outer", 1000, r#"{ module = "Call", config = { plan = "inner", prefix = "outer:" } }"#)
         + &plan("inner", 1000, r#"{ module = "Call", config = { prefix = "inner:" } }"#);
     assert_eq!(body(&engine(&text), "outer").await, (Status::Ok, "outer:inner:x".into()));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -172,6 +175,7 @@ async fn subplan_failures_reach_the_caller() {
     let (status, text) = body(&engine(&text), "outer").await;
     assert_eq!(status, Status::Error(ErrorKind::Internal));
     assert_eq!(text, "step: unknown plan `missing`");
+    support::assert_settled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -182,6 +186,7 @@ async fn the_callers_deadline_bounds_the_subplan() {
     let (status, text) = body(&engine(&text), "outer").await;
     assert_eq!(status, Status::Error(ErrorKind::Deadline), "{text}");
     assert_eq!(started.elapsed(), Duration::from_millis(50));
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -190,6 +195,7 @@ async fn runaway_recursion_is_stopped() {
     let (status, text) = body(&engine(&text), "loop").await;
     assert_eq!(status, Status::Error(ErrorKind::Internal));
     assert!(text.contains("nesting limit of 8"), "{text}");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -206,6 +212,7 @@ async fn services_are_resolved_at_build_and_at_request_time() {
     let wrong = Arc::new(ServiceRegistry::new().with("greeting", 5u32));
     let err = Engine::with_services(registry(), &file, wrong).unwrap_err().to_string();
     assert!(err.contains("is a `u32`, not a"), "{err}");
+    support::assert_settled().await;
 }
 
 #[tokio::test]
@@ -231,4 +238,5 @@ async fn a_reload_can_replace_the_services() {
     // A plain reload keeps the services it has.
     assert_eq!(e.reload(&file).unwrap(), 3);
     assert_eq!(body(&e, "p").await, (Status::Ok, "hi x (hi)".into()));
+    support::assert_settled().await;
 }

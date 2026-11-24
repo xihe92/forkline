@@ -61,6 +61,8 @@ async fn a_full_pool_answers_overloaded_on_every_protocol() {
 
     assert_eq!(running.await.unwrap(), "a@pool-calc-0", "the job ran on the pool's thread");
     assert_eq!(queued.await.unwrap(), "b@pool-calc-0", "the queued job ran after it");
+    drop(c);
+    drop(tcp);
     s.stop().await;
 }
 

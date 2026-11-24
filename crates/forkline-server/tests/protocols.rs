@@ -44,6 +44,7 @@ async fn http_answers_each_outcome_with_its_status() {
     let res = c.post(s.http("/p")).body(vec![b'x'; 65]).send().await.unwrap();
     assert_eq!(res.status(), 413, "over max_body_bytes");
     assert_eq!(c.post(s.http("/p")).body(vec![b'x'; 64]).send().await.unwrap().status(), 200, "at the limit");
+    drop(c);
     s.stop().await;
 }
 
@@ -82,6 +83,7 @@ async fn tcp_answers_each_outcome_with_its_status_byte() {
         send_frame(&mut conn, body).await;
         assert_eq!(read_frame(&mut conn).await.unwrap(), (status, Bytes::from(text)), "{body:?}");
     }
+    drop(conn);
     s.stop().await;
 }
 
@@ -110,6 +112,8 @@ async fn admission_refuses_on_every_protocol_and_recovers() {
     assert_eq!(grpc_call(s.grpc(), "P", "x").await.unwrap(), Bytes::from("x"));
     send_frame(&mut conn, b"y").await;
     assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("y")));
+    drop(c);
+    drop(conn);
     s.stop().await;
 }
 
@@ -126,6 +130,7 @@ async fn a_client_that_disconnects_frees_its_admission_slot() {
     let c = reqwest::Client::new();
     let (a, b) = tokio::join!(c.post(s.http("/p")).body("50|a").send(), c.post(s.http("/p")).body("50|b").send());
     assert_eq!((a.unwrap().status().as_u16(), b.unwrap().status().as_u16()), (200, 200));
+    drop(c);
     s.stop().await;
 }
 
@@ -138,6 +143,7 @@ async fn tcp_sends_the_responses_it_owes_before_closing_on_an_oversize_frame() {
     tokio::io::AsyncWriteExt::write_all(&mut conn, &(2u32 << 20).to_be_bytes()).await.unwrap();
     assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("owed")));
     assert!(read_frame(&mut conn).await.is_none(), "then the connection closes");
+    drop(conn);
     s.stop().await;
 }
 
@@ -153,6 +159,7 @@ async fn a_tcp_client_leaving_mid_pipeline_does_not_disturb_the_server() {
     let mut conn = s.tcp().await;
     send_frame(&mut conn, b"still here").await;
     assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("still here")));
+    drop(conn);
     s.stop().await;
 }
 
@@ -169,6 +176,7 @@ async fn tcp_reads_no_further_than_max_in_flight() {
         assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("a")));
         assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("b")));
         let took = started.elapsed();
+        drop(conn);
         s.stop().await;
         took
     }
@@ -197,6 +205,7 @@ async fn a_failing_error_node_is_an_internal_error_on_every_protocol() {
     // Requests that succeed never touch the error node.
     send_frame(&mut conn, b"fine").await;
     assert_eq!(read_frame(&mut conn).await.unwrap(), (0, Bytes::from("fine")));
+    drop(conn);
     s.stop().await;
 }
 
@@ -223,5 +232,6 @@ async fn a_grpc_request_whose_deadline_already_passed_never_runs() {
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(common::marks("expired-on-arrival"), 0, "the plan never ran");
+    drop(client);
     s.stop().await;
 }

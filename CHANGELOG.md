@@ -133,6 +133,13 @@ see "Before 1.0.0" for what remains.
   reruns once before failing on a regression over 10%, and skips when `main`
   hasn't changed. Pull requests still check that the benchmarks build. The
   latency run now fails when the 7-node fork/join plan's p99 is over 50 µs.
+- Leak checks: every server test that stops its server checks that no
+  request is still in flight on any listener or in admission control while
+  it serves, and after shutdown that no detached path, no extra task and
+  (under nextest) no extra file descriptor is left. Every async engine test
+  checks that no task outlives its requests, and so does each generated plan
+  in the scheduling property test. Checked by leaking an admission slot, a
+  task and a socket on purpose: each fails the suite.
 
 ### Before 1.0.0
 - Choose a licence (plan decision 8) and set `license` and `publish`.

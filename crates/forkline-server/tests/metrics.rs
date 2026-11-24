@@ -38,5 +38,6 @@ async fn metrics_are_exported() {
         assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
     }
     assert!(text.contains("forkline_inflight_requests{listener=\"http:127.0.0.1:"), "{text}");
+    drop(c);
     s.stop().await;
 }

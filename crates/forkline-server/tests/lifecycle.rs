@@ -30,12 +30,13 @@ async fn the_drain_timeout_cuts_off_grpc_and_tcp_requests_too() {
 
     let started = Instant::now();
     s.shutdown.cancel();
-    s.task.await.unwrap().unwrap();
-    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
 
     let status = grpc.await.unwrap().unwrap_err();
     assert_eq!((status.code(), status.message()), (Code::Unavailable, "shutting down"));
     assert_eq!(read_frame(&mut conn).await.unwrap(), (4, Bytes::from("shutting down")));
+    drop(conn);
+    s.finish().await;
+    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
 }
 
 #[tokio::test]
@@ -66,7 +67,8 @@ async fn shutdown_abandons_detached_paths_at_the_drain_timeout() {
     .await;
     reqwest::Client::new().post(s.http("/d")).body("x").send().await.unwrap();
     let started = Instant::now();
-    s.stop().await;
+    // The abandoned path is still running when the server returns, by design.
+    s.stop_unchecked().await;
     assert!(started.elapsed() < Duration::from_millis(1000), "{:?}", started.elapsed());
     assert_eq!(marks("abandoned-side"), 0);
 }
@@ -101,6 +103,7 @@ async fn a_reload_that_drops_a_served_plan_is_rejected() {
     *next.lock().unwrap() = plans(&[("p", "-v2", 0, 1000), ("q", "", 0, 1000)]);
     assert_eq!(c.post(s.admin("/admin/reload")).send().await.unwrap().status(), 200);
     assert_eq!(c.post(s.http("/p")).body("x").send().await.unwrap().text().await.unwrap(), "x-v2");
+    drop(c);
     s.stop().await;
 }
 

@@ -297,24 +297,131 @@ pub struct Running {
     pub addrs: Addrs,
     pub shutdown: CancellationToken,
     pub task: tokio::task::JoinHandle<Result<(), ServerError>>,
+    leaks: LeakCheck,
 }
 
 pub async fn start(config: &str, engine: Arc<Engine>, hooks: Hooks) -> Running {
+    let leaks = LeakCheck::baseline(engine.clone());
     let config = ServerConfig::from_toml_str(config).unwrap();
     let server = BoundServer::bind_with(&config, engine, hooks).await.unwrap();
     let mut addrs = Addrs::default();
+    let mut leaks = LeakCheck { admission: server.admission().cloned(), ..leaks };
     for b in server.bound() {
         match *b {
-            Bound::Http(a) => addrs.http = Some(a),
-            Bound::Grpc(a) => addrs.grpc = Some(a),
-            Bound::Tcp(a) => addrs.tcp = Some(a),
+            Bound::Http(a) => {
+                addrs.http = Some(a);
+                leaks.listeners.push(format!("http:{a}"));
+            }
+            Bound::Grpc(a) => {
+                addrs.grpc = Some(a);
+                leaks.listeners.push(format!("grpc:{a}"));
+            }
+            Bound::Tcp(a) => {
+                addrs.tcp = Some(a);
+                leaks.listeners.push(format!("tcp:{a}"));
+            }
             Bound::Admin(a) => addrs.admin = Some(a),
             _ => {}
         }
     }
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(server.run(shutdown.clone()));
-    Running { addrs, shutdown, task }
+    Running { addrs, shutdown, task, leaks }
+}
+
+/// How long the leak checks wait for things to settle.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// What a test's server must give back: nothing in flight while it still
+/// serves; after shutdown no detached path, no task beyond those alive before
+/// it started and, when each test has its own process (cargo nextest), no
+/// file descriptor beyond those open before it started. The Rust counterpart
+/// of Netty's leak detector: tasks, admission slots and sockets can leak even
+/// though memory is safe.
+///
+/// Clients the test holds count too (their sockets, and the tasks of a pooled
+/// HTTP client), so tests drop their clients before stopping the server.
+struct LeakCheck {
+    engine: Arc<Engine>,
+    admission: Option<Arc<forkline_server::admission::Admission>>,
+    /// Listener labels, as in `forkline_inflight_requests{listener=...}`.
+    listeners: Vec<String>,
+    tasks: usize,
+    fds: Option<usize>,
+}
+
+impl LeakCheck {
+    fn baseline(engine: Arc<Engine>) -> Self {
+        Self {
+            engine,
+            admission: None,
+            listeners: Vec::new(),
+            tasks: tokio::runtime::Handle::current().metrics().num_alive_tasks(),
+            fds: open_fds(),
+        }
+    }
+
+    /// Requests still in flight, per listener and in admission control.
+    fn in_flight(&self) -> Vec<String> {
+        let registry = forkline_server::telemetry::metrics_registry();
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, &registry).unwrap();
+        let mut left: Vec<String> = self
+            .listeners
+            .iter()
+            .filter_map(|listener| {
+                let prefix = format!("forkline_inflight_requests{{listener=\"{listener}\"}} ");
+                let n: i64 = text.lines().find_map(|l| l.strip_prefix(&prefix))?.trim().parse().unwrap();
+                (n != 0).then(|| format!("{listener} has {n} request(s) in flight"))
+            })
+            .collect();
+        if let Some(n) = self.admission.as_ref().map(|a| a.in_flight()).filter(|&n| n != 0) {
+            left.push(format!("admission control counts {n} request(s) in flight"));
+        }
+        left
+    }
+
+    /// What is still held after the server stopped.
+    fn held(&self) -> Vec<String> {
+        let mut left = Vec::new();
+        let detached = self.engine.detached_running();
+        if detached != 0 {
+            left.push(format!("{detached} request(s) with detached paths still running"));
+        }
+        let tasks = tokio::runtime::Handle::current().metrics().num_alive_tasks();
+        if tasks > self.tasks {
+            left.push(format!("{} task(s) still alive ({} before the server started)", tasks - self.tasks, self.tasks));
+        }
+        if let (Some(before), Some(now)) = (self.fds, open_fds())
+            && now > before
+        {
+            left.push(format!("{} file descriptor(s) still open ({before} before the server started)", now - before));
+        }
+        left
+    }
+}
+
+/// Poll `check` until it finds nothing, or fail the test after [`SETTLE`].
+async fn settle(when: &str, check: impl Fn() -> Vec<String>) {
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        let left = check();
+        if left.is_empty() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "leak check {when}:\n  {}", left.join("\n  "));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Open file descriptors of this process, when the count belongs to one test:
+/// only under cargo nextest, which runs each test in its own process.
+fn open_fds() -> Option<usize> {
+    if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() != Ok("process-per-test") {
+        return None;
+    }
+    // Reading the directory opens one descriptor itself, every time alike.
+    std::fs::read_dir("/dev/fd").ok().map(Iterator::count)
 }
 
 impl Running {
@@ -334,7 +441,24 @@ impl Running {
         format!("http://{}{path}", self.addrs.admin.unwrap())
     }
 
+    /// Check that nothing is in flight, stop the server, and check that
+    /// nothing leaked (see [`LeakCheck`]). Drop clients first.
     pub async fn stop(self) {
+        settle("before shutdown", || self.leaks.in_flight()).await;
+        self.shutdown.cancel();
+        self.finish().await;
+    }
+
+    /// For tests that cancel `shutdown` themselves: wait for the server to
+    /// end, then check that nothing leaked.
+    pub async fn finish(self) {
+        self.task.await.unwrap().unwrap();
+        settle("after shutdown", || self.leaks.held()).await;
+    }
+
+    /// Stop without the leak checks, for a test that leaves work running on
+    /// purpose. Say why where it is used.
+    pub async fn stop_unchecked(self) {
         self.shutdown.cancel();
         self.task.await.unwrap().unwrap();
     }
