@@ -323,6 +323,19 @@ so a route can never point at a missing plan.
 HTTP request bodies are limited to `max_body_bytes` per listener (default
 2 MiB; larger bodies get 413), TCP frames to `max_frame_bytes`.
 
+Slow and idle clients: each HTTP listener closes a connection whose client
+takes longer than `header_read_timeout_ms` to send a request's headers
+(HTTP/1), and one with no request in flight for `idle_timeout_ms` (HTTP/1 and
+HTTP/2). Both default to 60 s, Spring MVC's (Tomcat's) connection timeout:
+
+```toml
+[[http]]
+addr = "0.0.0.0:8080"
+routes = { "/echo" = "echo" }
+header_read_timeout_ms = 60000
+idle_timeout_ms = 60000
+```
+
 A failure after the request's deadline has passed is reported as a deadline
 (HTTP 504, gRPC `DEADLINE_EXCEEDED`, TCP status 3), even when the module saw it
 as its own error, for example a service call cut off by the same deadline.

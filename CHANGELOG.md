@@ -83,6 +83,14 @@ see "Before 1.0.0" for what remains.
   or on cancellation, skips jobs whose request gave up while queued, survives
   panics, and refuses at once when the queue is full. Pools drain at shutdown
   and report `forkline_pool_*` metrics.
+- HTTP listeners take `header_read_timeout_ms` (HTTP/1: time to send a
+  request's headers, counted from the start of the connection or the end of
+  the previous response) and `idle_timeout_ms` (no request in flight), both
+  60 s by default as in Spring MVC on Tomcat. Before, neither existed:
+  `axum::serve` configures no timer, so hyper's 30 s header timeout was off,
+  and a client could hold a connection forever by sending nothing. The HTTP
+  and admin listeners now run on Forkline's own accept loop (hyper-util),
+  which also closes every connection when the drain cut-off aborts it.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

@@ -8,6 +8,8 @@
 //! addr = "0.0.0.0:8080"
 //! routes = { "/echo" = "echo" }   # GET or POST /echo runs plan `echo`
 //! max_body_bytes = 2097152        # larger bodies get 413 (default 2 MiB)
+//! header_read_timeout_ms = 60000  # HTTP/1: time to send a request's headers
+//! idle_timeout_ms = 60000         # close connections idle this long
 //!
 //! [[grpc]]
 //! addr = "0.0.0.0:50051"
@@ -219,13 +221,40 @@ pub struct HttpListener {
     /// Largest accepted request body; a larger one gets 413 (default 2 MiB).
     #[serde(default = "default_max_body")]
     pub max_body_bytes: usize,
+    /// HTTP/1: time a client has to send a request's complete headers,
+    /// counted from when the server starts waiting for them (a new
+    /// connection, or the end of the previous response on a kept-alive one).
+    /// Then the connection is closed. Default 60 s.
+    #[serde(default = "default_http_timeout_ms")]
+    pub header_read_timeout_ms: u64,
+    /// Close a connection that has had no request in flight for this long
+    /// (HTTP/1 and HTTP/2). Default 60 s.
+    #[serde(default = "default_http_timeout_ms")]
+    pub idle_timeout_ms: u64,
+}
+
+impl HttpListener {
+    pub(crate) fn timeouts(&self) -> crate::http_serve::Timeouts {
+        crate::http_serve::Timeouts {
+            header_read: std::time::Duration::from_millis(self.header_read_timeout_ms),
+            idle: std::time::Duration::from_millis(self.idle_timeout_ms),
+        }
+    }
 }
 
 /// Default request body limit for HTTP listeners: 2 MiB.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 2 << 20;
 
+/// Default header-read and idle timeouts for HTTP listeners, as Spring MVC's
+/// (Tomcat's) connection timeout: 60 s.
+pub const DEFAULT_HTTP_TIMEOUT_MS: u64 = 60_000;
+
 fn default_max_body() -> usize {
     DEFAULT_MAX_BODY_BYTES
+}
+
+fn default_http_timeout_ms() -> u64 {
+    DEFAULT_HTTP_TIMEOUT_MS
 }
 
 /// One gRPC listener serving `forkline.v1.Plans`.
@@ -356,6 +385,9 @@ impl ServerConfig {
         for l in &self.http {
             if l.max_body_bytes == 0 {
                 problems.push(format!("http {}: max_body_bytes must be > 0", l.addr));
+            }
+            if l.header_read_timeout_ms == 0 || l.idle_timeout_ms == 0 {
+                problems.push(format!("http {}: header_read_timeout_ms and idle_timeout_ms must be > 0", l.addr));
             }
             for (path, plan) in &l.routes {
                 if !path.starts_with('/') {

@@ -116,6 +116,7 @@ async fn server_config_problems_are_reported_together() {
         addr = "127.0.0.1:0"
         routes = { "no-slash" = "p", "/ghost" = "ghost" }
         max_body_bytes = 0
+        idle_timeout_ms = 0
         [[grpc]]
         addr = "127.0.0.1:0"
         methods = { "a/b" = "p", "" = "p", Ghost = "ghost" }
@@ -145,6 +146,7 @@ async fn server_config_problems_are_reported_together() {
         "admin: `10.0.0.0/33` is not an IP address or network",
         "admin: `not-an-ip` is not an IP address or network",
         "http 127.0.0.1:0: max_body_bytes must be > 0",
+        "http 127.0.0.1:0: header_read_timeout_ms and idle_timeout_ms must be > 0",
         "http 127.0.0.1:0: route `/ghost` names unknown plan `ghost`",
         "http 127.0.0.1:0: route `no-slash` must start with `/`",
         "grpc 127.0.0.1:0: `` is not a valid method name",

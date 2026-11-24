@@ -804,6 +804,8 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

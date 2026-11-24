@@ -24,6 +24,8 @@ forkline-plan.workspace = true
 forkline-services.workspace = true
 http.workspace = true
 http-body.workspace = true
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server-auto", "service", "tokio", "http1", "http2"] }
 prometheus-client.workspace = true
 console-subscriber = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
@@ -46,7 +48,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 forkline-macros.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["http2"] }
 tonic = { workspace = true, features = ["channel"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "sync"] }
 

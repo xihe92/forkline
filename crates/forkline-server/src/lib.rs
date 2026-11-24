@@ -24,6 +24,7 @@ pub mod cli;
 pub mod config;
 pub mod grpc;
 pub mod http;
+mod http_serve;
 mod status;
 pub mod tcp;
 pub mod telemetry;
@@ -107,7 +108,7 @@ impl std::fmt::Debug for Hooks {
 /// All listeners bound; call [`BoundServer::run`] to serve.
 #[derive(Debug)]
 pub struct BoundServer {
-    http: Vec<(TcpListener, axum::Router)>,
+    http: Vec<(TcpListener, axum::Router, http_serve::Timeouts)>,
     grpc: Vec<(TcpListener, grpc::GrpcPlans)>,
     tcp: Vec<(TcpListener, TcpListenerConfig, Gate)>,
     admin: Option<(TcpListener, axum::Router)>,
@@ -153,9 +154,8 @@ impl BoundServer {
             let addr = local_addr(&tcp, listener.addr)?;
             server.bound.push(Bound::Http(addr));
             let gate = Gate::new(admission.clone(), format!("http:{addr}"), hard_stop.clone());
-            server
-                .http
-                .push((tcp, http::gated_router(engine.clone(), &listener.routes, listener.max_body_bytes, gate)));
+            let router = http::gated_router(engine.clone(), &listener.routes, listener.max_body_bytes, gate);
+            server.http.push((tcp, router, listener.timeouts()));
         }
         for listener in &config.grpc {
             let tcp = bind(listener.addr).await?;
@@ -202,13 +202,11 @@ impl BoundServer {
     /// left of it, and the admin listener stops last.
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), ServerError> {
         let mut listeners: JoinSet<Result<(), ServerError>> = JoinSet::new();
-        for (tcp, router) in self.http {
+        for (tcp, router, timeouts) in self.http {
             let stop = shutdown.clone();
             listeners.spawn(async move {
-                axum::serve(tcp, router.into_make_service_with_connect_info::<SocketAddr>())
-                    .with_graceful_shutdown(stop.cancelled_owned())
-                    .await
-                    .map_err(|e| ServerError::Serve { listener: "http", message: e.to_string() })
+                http_serve::serve(tcp, router, timeouts, stop).await;
+                Ok(())
             });
         }
         for (tcp, plans) in self.grpc {
@@ -232,12 +230,7 @@ impl BoundServer {
         let admin_stop = CancellationToken::new();
         let admin_task = self.admin.map(|(tcp, router)| {
             let stop = admin_stop.clone();
-            tokio::spawn(async move {
-                axum::serve(tcp, router.into_make_service_with_connect_info::<SocketAddr>())
-                    .with_graceful_shutdown(stop.cancelled_owned())
-                    .await
-                    .map_err(|e| ServerError::Serve { listener: "admin", message: e.to_string() })
-            })
+            tokio::spawn(http_serve::serve(tcp, router, ADMIN_TIMEOUTS, stop))
         });
 
         // Serve until asked to stop, or until a listener fails.
@@ -293,6 +286,12 @@ impl BoundServer {
         result
     }
 }
+
+/// The admin listener's timeouts: the HTTP listeners' defaults.
+const ADMIN_TIMEOUTS: http_serve::Timeouts = http_serve::Timeouts {
+    header_read: Duration::from_millis(config::DEFAULT_HTTP_TIMEOUT_MS),
+    idle: Duration::from_millis(config::DEFAULT_HTTP_TIMEOUT_MS),
+};
 
 async fn bind(addr: SocketAddr) -> Result<TcpListener, ServerError> {
     TcpListener::bind(addr).await.map_err(|source| ServerError::Bind { addr, source })

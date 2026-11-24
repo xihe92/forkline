@@ -30,6 +30,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
 console-subscriber = "0.5"
 opentelemetry = "0.33"
 opentelemetry_sdk = "0.33"
