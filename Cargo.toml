@@ -7,8 +7,10 @@ exclude = ["fuzz"]
 version = "1.0.0-rc.1"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xihe92/forkline"
+# Not on crates.io yet.
 publish = false
-# Licence is open decision 8 in the implementation plan; set it before any release.
 
 [workspace.dependencies]
 forkline = { path = "crates/forkline" }

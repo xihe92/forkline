@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
+license = "MIT OR Apache-2.0"
 
 # Standalone workspace, so rdkafka (which builds librdkafka from C) stays out
 # of Forkline's own build and CI.

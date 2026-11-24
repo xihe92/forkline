@@ -136,6 +136,10 @@ see "Before 1.0.0" for what remains.
   configured pools and the plans the listeners serve. Both examples pass their
   `server.toml`.
 
+- Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`); every
+  crate declares `license` and `repository`. The repository is public at
+  https://github.com/xihe92/forkline.
+
 ### Fixes after rc.1
 - A reload or rollback that removes a plan a listener serves is now rejected
   (`Engine::require_plans`, set when the server binds). Before, it was
@@ -209,6 +213,6 @@ see "Before 1.0.0" for what remains.
   runs to its end, since a closed and a half-closed connection look the same.
 
 ### Before 1.0.0
-- Choose a licence (plan decision 8) and set `license` and `publish`.
+- Decide whether to publish the crates on crates.io (`publish`).
 - Run `scripts/soak.sh` for 24 hours on production-like hardware.
 - Add `cargo semver-checks` to CI once the crates are published.
