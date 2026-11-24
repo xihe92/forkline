@@ -43,3 +43,17 @@ path = "fuzz_targets/tcp_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_frames"
+path = "fuzz_targets/grpc_frames.rs"
+test = false
+doc = false
+bench = false

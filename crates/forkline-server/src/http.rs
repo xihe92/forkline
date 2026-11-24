@@ -105,3 +105,18 @@ fn to_response(result: Result<Reply, EngineError>) -> Response {
         }
     }
 }
+
+/// Serve one HTTP connection (HTTP/1.1 or h2c) over any byte stream, without
+/// admission control, with 1 s timeouts. For fuzzing; servers use the
+/// listeners configured in `server.toml`.
+#[doc(hidden)]
+pub async fn serve_stream<IO>(stream: IO, engine: Arc<Engine>, routes: &BTreeMap<String, String>)
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let timeouts = crate::http_serve::Timeouts {
+        header_read: std::time::Duration::from_secs(1),
+        idle: std::time::Duration::from_secs(1),
+    };
+    crate::http_serve::serve_stream(stream, router(engine, routes), crate::http_serve::Versions::Both, timeouts).await;
+}

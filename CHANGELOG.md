@@ -113,6 +113,13 @@ see "Before 1.0.0" for what remains.
   with `--cfg tokio_unstable`, the server also times every task poll
   (`forkline_task_slow_polls_total`, logged with the spawn location), which
   `scripts/blocking-check.sh` checks nightly under load.
+- Fuzzing through the real server: `http_request` (any bytes into an HTTP
+  listener connection, HTTP/1.1 or h2c) and `grpc_frames` (any HTTP/2 frames
+  into a gRPC listener connection) run the listeners' connection code over an
+  in-memory stream and check that it never panics, always closes, answers
+  with well-formed HTTP/1 or HTTP/2, and leaves no task behind. Each target
+  now fuzzes for 30 minutes nightly; the corpus is kept between runs and
+  pull requests' 60-second run starts from it.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

@@ -176,6 +176,20 @@ impl tonic::server::UnaryService<Bytes> for PlanUnary {
     }
 }
 
+/// Serve one gRPC connection (HTTP/2) over any byte stream, without
+/// admission control, with a 1 s idle timeout. For fuzzing; servers use the
+/// listeners configured in `server.toml`.
+#[doc(hidden)]
+pub async fn serve_stream<IO>(stream: IO, engine: Arc<Engine>, methods: &BTreeMap<String, String>)
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let idle = Duration::from_secs(1);
+    let timeouts = crate::http_serve::Timeouts { header_read: idle, idle };
+    let plans = GrpcPlans::new(engine, methods);
+    crate::http_serve::serve_stream(stream, plans, crate::http_serve::Versions::Http2, timeouts).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

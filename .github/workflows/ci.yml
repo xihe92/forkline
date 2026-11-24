@@ -100,10 +100,42 @@ jobs:
         with:
           workspaces: fuzz
       - run: cargo install cargo-fuzz --locked
+      # Start from the corpora the nightly fuzzing keeps, one cache entry per
+      # target (see nightly.yml; a cache restores only under the path it was saved).
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/plans
+          key: fuzz-corpus-plans-${{ github.run_id }}
+          restore-keys: fuzz-corpus-plans-
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/config
+          key: fuzz-corpus-config-${{ github.run_id }}
+          restore-keys: fuzz-corpus-config-
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/tcp_frames
+          key: fuzz-corpus-tcp_frames-${{ github.run_id }}
+          restore-keys: fuzz-corpus-tcp_frames-
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/http_request
+          key: fuzz-corpus-http_request-${{ github.run_id }}
+          restore-keys: fuzz-corpus-http_request-
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/grpc_frames
+          key: fuzz-corpus-grpc_frames-${{ github.run_id }}
+          restore-keys: fuzz-corpus-grpc_frames-
       - name: 60 seconds per target
         working-directory: fuzz
         run: |
-          for t in plans config tcp_frames; do
+          for t in plans config tcp_frames http_request grpc_frames; do
             mkdir -p corpus/$t && cp seeds/$t/* corpus/$t/
-            cargo +nightly fuzz run $t corpus/$t -- -max_total_time=60
+            cargo +nightly fuzz run $t corpus/$t -- -max_total_time=60 -timeout=10
           done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/

@@ -1,0 +1,10 @@
+POST /p HTTP/1.1
+host: x
+content-length: 2
+
+hiPOST /p HTTP/1.1
+host: x
+content-length: 3
+connection: close
+
+bye

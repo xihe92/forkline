@@ -136,3 +136,59 @@ pub fn registry() -> Registry {
         .build()
         .unwrap()
 }
+
+/// The HTTP/2 client connection preface.
+pub const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Check that `out` is a sequence of complete HTTP/2 frames, the first a
+/// SETTINGS frame, as a server must send.
+pub fn assert_h2_frames(out: &[u8]) {
+    let mut rest = out;
+    let mut first = true;
+    while !rest.is_empty() {
+        assert!(rest.len() >= 9, "truncated HTTP/2 frame header: {rest:?}");
+        let len = usize::from(rest[0]) << 16 | usize::from(rest[1]) << 8 | usize::from(rest[2]);
+        let kind = rest[3];
+        assert!(kind <= 9, "unknown HTTP/2 frame type {kind}");
+        if first {
+            assert_eq!(kind, 4, "the server's first frame must be SETTINGS");
+            first = false;
+        }
+        assert!(rest.len() >= 9 + len, "truncated HTTP/2 frame: {len} bytes announced, {} left", rest.len() - 9);
+        rest = &rest[9 + len..];
+    }
+}
+
+/// Fail if a task is still alive on the current runtime a second after the
+/// connection closed (the leak check the server's tests run).
+pub async fn assert_no_task_left() {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let alive = tokio::runtime::Handle::current().metrics().num_alive_tasks();
+        if alive == 0 {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{alive} task(s) still alive after the connection closed");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// One plan `p` over the test modules, for the connection targets.
+pub fn engine() -> std::sync::Arc<forkline_engine::Engine> {
+    let plans = forkline_plan::PlansFile::from_toml_str(
+        r#"
+        [plans.p]
+        root = "decode"
+        terminal = "error"
+        time_budget_ms = 1000
+        links = ["decode -> m", "m -> encode"]
+        [plans.p.nodes]
+        decode = { module = "Dec" }
+        m      = { module = "M1", config = { factor = 3 } }
+        encode = { module = "Enc" }
+        error  = { module = "Term" }
+        "#,
+    )
+    .expect("plan");
+    std::sync::Arc::new(forkline_engine::Engine::new(std::sync::Arc::new(registry()), &plans).expect("engine"))
+}

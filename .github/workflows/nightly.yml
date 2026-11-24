@@ -90,3 +90,43 @@ jobs:
         with:
           name: blocking-check
           path: target/blocking-check/
+
+  # Each target fuzzes for 30 minutes, all in parallel. The corpus is kept in
+  # the Actions cache from night to night (minimised first), and pull
+  # requests' 60-second fuzz run starts from it. Crashes are uploaded.
+  fuzz:
+    name: fuzz ${{ matrix.target }} (30 min)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [plans, config, tcp_frames, http_request, grpc_frames]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: fuzz for 30 minutes
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/${{ matrix.target }} && cp seeds/${{ matrix.target }}/* corpus/${{ matrix.target }}/
+          cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} -- -max_total_time=1800 -timeout=10
+      - name: minimise the corpus
+        working-directory: fuzz
+        run: cargo +nightly fuzz cmin ${{ matrix.target }} corpus/${{ matrix.target }}
+      - uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/

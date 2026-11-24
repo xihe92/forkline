@@ -1,0 +1,3 @@
+GET /p?a=1&b=two HTTP/1.1
+host: x
+

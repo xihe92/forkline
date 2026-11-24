@@ -64,11 +64,7 @@ pub(crate) async fn serve<S, B>(
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let mut builder = auto::Builder::new(TokioExecutor::new());
-    builder.http1().timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
-    // A timer for HTTP/2 too: hyper needs one for any HTTP/2 timeout.
-    builder.http2().timer(TokioTimer::new());
-    let builder = if versions == Versions::Http2 { builder.http2_only() } else { builder };
+    let builder = builder(versions, timeouts);
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -77,8 +73,9 @@ pub(crate) async fn serve<S, B>(
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
                     let _ = stream.set_nodelay(true);
+                    let local = stream.local_addr().ok();
                     let (builder, service, stop) = (builder.clone(), service.clone(), shutdown.clone());
-                    connections.spawn(connection(builder, stream, peer, service, timeouts.idle, stop));
+                    connections.spawn(connection(builder, stream, peer, local, service, timeouts.idle, stop));
                 }
                 Err(e) => accept_failed(&e).await,
             },
@@ -86,6 +83,32 @@ pub(crate) async fn serve<S, B>(
     }
     drop(listener);
     while connections.join_next().await.is_some() {}
+}
+
+fn builder(versions: Versions, timeouts: Timeouts) -> auto::Builder<TokioExecutor> {
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder.http1().timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
+    // A timer for HTTP/2 too: hyper needs one for any HTTP/2 timeout.
+    builder.http2().timer(TokioTimer::new());
+    if versions == Versions::Http2 { builder.http2_only() } else { builder }
+}
+
+/// Serve one connection over any byte stream, as the listener would serve
+/// an accepted socket. For fuzzing.
+pub(crate) async fn serve_stream<IO, S, B>(stream: IO, service: S, versions: Versions, timeouts: Timeouts)
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    S: tower::Service<http::Request<Incoming>, Response = http::Response<B>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let peer = SocketAddr::from(([127, 0, 0, 1], 0));
+    let builder = builder(versions, timeouts);
+    connection(builder, stream, peer, None, service, timeouts.idle, CancellationToken::new()).await;
 }
 
 /// Out of file descriptors and the like: wait before trying again instead of
@@ -98,14 +121,16 @@ async fn accept_failed(e: &std::io::Error) {
     }
 }
 
-async fn connection<S, B>(
+async fn connection<IO, S, B>(
     builder: auto::Builder<TokioExecutor>,
-    stream: tokio::net::TcpStream,
+    stream: IO,
     peer: SocketAddr,
+    local: Option<SocketAddr>,
     inner: S,
     idle: Duration,
     shutdown: CancellationToken,
 ) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     S: tower::Service<http::Request<Incoming>, Response = http::Response<B>, Error = Infallible>
         + Clone
         + Send
@@ -114,8 +139,7 @@ async fn connection<S, B>(
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let tcp_info =
-        tonic::transport::server::TcpConnectInfo { local_addr: stream.local_addr().ok(), remote_addr: Some(peer) };
+    let tcp_info = tonic::transport::server::TcpConnectInfo { local_addr: local, remote_addr: Some(peer) };
     // How many requests are in flight on this connection, and since when.
     let (activity, mut watch) = watch::channel((0usize, Instant::now()));
     let service = tower::service_fn(move |mut request: http::Request<Incoming>| {
