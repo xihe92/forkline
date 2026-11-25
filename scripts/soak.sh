@@ -9,8 +9,8 @@
 #   scripts/soak.sh [duration_seconds=86400] [rate_per_second=5000] [out_dir=target/soak]
 #
 # Needs: a release build (cargo build --release -p forkline-horoscope) and oha.
-# Runs on Linux and macOS. CI runs it weekly for 30 minutes; run the 24-hour
-# soak before a release on fixed hardware.
+# Runs on Linux and macOS. The nightly CI run includes it for 30 minutes when
+# main changed; run the 24-hour soak before a release on fixed hardware.
 set -euo pipefail
 
 DURATION=${1:-86400}
