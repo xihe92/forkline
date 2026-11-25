@@ -142,6 +142,14 @@ see "Before 1.0.0" for what remains.
   count per quarter), since connection pools make the peaks swing: on
   GitHub the outgoing pool to the backend moved between about 20 and 126
   connections while incoming connections stayed at 64.
+- `jemalloc` feature: `/metrics` exports jemalloc's statistics
+  (`forkline_allocator_allocated_bytes`, `_active_bytes`, `_resident_bytes`)
+  through `tikv-jemalloc-ctl` (TiKV). The horoscope example gained a
+  `jemalloc` feature; the nightly soak runs on it and fails if the floor of
+  allocated bytes grows more than 10% and 2 MB. A 5.5-hour soak on the system
+  allocator showed resident memory step from 14 to 17 MB after a pause on the
+  runner and stay there: memory glibc kept for reuse, which RSS alone can't
+  tell from a leak.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

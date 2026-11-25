@@ -144,6 +144,8 @@ pub fn metrics_registry() -> std::sync::Arc<prometheus_client::registry::Registr
     crate::admission::register(&mut registry);
     forkline_core::pool::register_metrics(&mut registry);
     crate::task_polls::register(&mut registry);
+    #[cfg(feature = "jemalloc")]
+    crate::allocator::register(&mut registry);
     std::sync::Arc::new(registry)
 }
 

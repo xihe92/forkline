@@ -19,6 +19,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub mod admin;
 pub mod admission;
+#[cfg(feature = "jemalloc")]
+mod allocator;
 mod allow;
 pub mod cli;
 pub mod config;

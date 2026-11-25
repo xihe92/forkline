@@ -8,6 +8,10 @@ publish.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Run on jemalloc and export its memory statistics (the nightly soak uses it).
+jemalloc = ["forkline-server/jemalloc"]
+
 [[bin]]
 name = "forkline-horoscope"
 path = "src/main.rs"

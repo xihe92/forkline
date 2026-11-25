@@ -8,9 +8,14 @@
 # than 0.1% of requests fail or get a non-2xx answer; or if the server panics
 # or stops before the end.
 #
+# Built with jemalloc (cargo build --release -p forkline-horoscope --features
+# jemalloc), the server reports the bytes it really uses apart from the memory
+# the allocator holds for reuse; the run then also fails if the lowest count of
+# allocated bytes grows more than 10% and more than 2 MB.
+#
 #   scripts/soak.sh [duration_seconds=86400] [rate_per_second=5000] [out_dir=target/soak]
 #
-# Needs: a release build (cargo build --release -p forkline-horoscope) and oha.
+# Needs: a release build (cargo build --release -p forkline-horoscope --bins) and oha.
 # Runs on Linux and macOS. The nightly CI run includes it for 30 minutes when
 # main changed; run the 24-hour soak before a release on fixed hardware.
 set -euo pipefail
@@ -61,7 +66,16 @@ fds() {
   else lsof -p "$1" 2>/dev/null | wc -l | tr -d ' '; fi
 }
 
-echo "elapsed_s,rss_kb,threads,fds" > "$OUT/samples.csv"
+# jemalloc's statistics from /metrics, in kB: "allocated,resident", or ","
+# when the server runs on another allocator.
+allocator() {
+  curl -s --max-time 5 http://127.0.0.1:16791/metrics | awk '
+    $1 == "forkline_allocator_allocated_bytes" { a = int($2 / 1024) }
+    $1 == "forkline_allocator_resident_bytes"  { r = int($2 / 1024) }
+    END { print a "," r }'
+}
+
+echo "elapsed_s,rss_kb,threads,fds,allocated_kb,resident_kb" > "$OUT/samples.csv"
 START=$(date +%s)
 while kill -0 "$LOAD" 2>/dev/null; do
   if ! kill -0 "$SERVER" 2>/dev/null; then
@@ -70,7 +84,7 @@ while kill -0 "$LOAD" 2>/dev/null; do
   fi
   NOW=$(( $(date +%s) - START ))
   RSS=$(ps -o rss= -p "$SERVER" | tr -d ' ')
-  echo "$NOW,$RSS,$(threads "$SERVER"),$(fds "$SERVER")" >> "$OUT/samples.csv"
+  echo "$NOW,$RSS,$(threads "$SERVER"),$(fds "$SERVER"),$(allocator)" >> "$OUT/samples.csv"
   sleep "$INTERVAL"
 done
 wait "$LOAD" || true
@@ -89,7 +103,7 @@ if len(rows) < 8:
     sys.exit(f"FAIL: only {len(rows)} samples; run longer")
 
 def quarters(column):
-    values = [int(r[column]) for r in rows if r[column]]
+    values = [int(r[column]) for r in rows if r.get(column)]
     q = max(1, len(values) // 4)
     return values, values[q:2 * q], values[-q:]   # skip the warm-up quarter
 
@@ -116,6 +130,22 @@ for column, pct, slack in (("fds", 10, 16), ("threads", 25, 8)):
     )
     if min(last_q) > limit:
         problems.append(f"the {column} floor rose from {min(first_q)} to {min(last_q)}")
+# With jemalloc: the bytes in live allocations, what a leak makes grow. Unlike
+# resident memory it excludes what the allocator keeps for reuse, so it is
+# compared by its floor with a tighter amount (pools still make it swing).
+allocated, a_early, a_late = quarters("allocated_kb")
+if len(allocated) >= 8:
+    _, r_early, r_late = quarters("resident_kb")
+    floor_growth = (min(a_late) - min(a_early)) / min(a_early) * 100 if min(a_early) else 0
+    print(
+        f"jemalloc allocated: start {allocated[0]} kB, second quarter {min(a_early)}-{max(a_early)} kB, "
+        f"last quarter {min(a_late)}-{max(a_late)} kB (floor {floor_growth:+.1f}%); "
+        f"resident: second quarter {min(r_early)}-{max(r_early)} kB, last quarter {min(r_late)}-{max(r_late)} kB"
+    )
+    if floor_growth >= 10 and min(a_late) - min(a_early) > 2048:
+        problems.append(f"allocated bytes' floor grew {floor_growth:+.1f}% ({(min(a_late) - min(a_early)) / 1024:.1f} MB)")
+elif allocated:
+    problems.append(f"only {len(allocated)} allocator samples")
 
 d = json.load(open(f"{out}/oha.json")); s = d["summary"]; p = d["latencyPercentiles"]
 total = sum(d["statusCodeDistribution"].values())

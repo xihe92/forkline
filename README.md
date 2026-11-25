@@ -395,6 +395,11 @@ Metrics: `forkline_requests_total{plan,outcome}`,
 `forkline_admission_refused_total{listener}`,
 `forkline_service_call_duration_seconds{service,outcome}`,
 `forkline_reloads_total{result}`, `forkline_snapshot_version`.
+With the `jemalloc` feature, `forkline_allocator_allocated_bytes` (live
+allocations), `_active_bytes` and `_resident_bytes` (memory jemalloc holds,
+including freed pages it hasn't returned to the OS yet) tell a leak from
+memory kept for reuse. jemalloc returns unused pages after about 10 s; tune it
+with `_RJEM_MALLOC_CONF` (for example `background_thread:true`).
 
 Inbound `traceparent` and `tracestate` headers are forwarded on every
 outbound HTTP and gRPC call. Outbound gRPC calls also carry `grpc-timeout`
@@ -446,6 +451,10 @@ fail; or if the server panics or stops. The nightly CI run includes it, for
 30 minutes at 5,000 req/s, whenever `main` changed in more than docs since the
 last successful nightly run (as does the benchmark gate). A manual run can
 soak for up to 5.5 hours: `gh workflow run nightly.yml -f force=true -f soak_minutes=330`.
+The nightly soak runs the server on jemalloc (`--features jemalloc`; a manual
+run can pick `-f allocator=system`), so it also fails if the bytes in live
+allocations grow (their lowest count per quarter, more than 10% and 2 MB),
+however much memory the allocator keeps for reuse.
 A 10-minute run at 5,000 req/s served 3,000,000 requests with no errors
 (p99 1.04 ms) and memory flat at 24 MB (+0.2%). A 24-hour run is still to do
 before 1.0.0.

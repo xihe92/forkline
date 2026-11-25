@@ -9,8 +9,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Use jemalloc as the global allocator.
-jemalloc = ["dep:tikv-jemallocator"]
+# Use jemalloc as the global allocator, and export its memory statistics
+# (forkline_allocator_*_bytes) at /metrics.
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "tikv-jemalloc-ctl/stats", "tikv-jemallocator/stats"]
 # Export traces over OTLP (gRPC) and continue inbound W3C trace context.
 otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 # tokio-console support; build with RUSTFLAGS="--cfg tokio_unstable".
@@ -37,6 +38,7 @@ tracing-opentelemetry = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["sink"] }
 serde_json.workspace = true
 tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "macros", "time"] }

@@ -16,6 +16,11 @@ on:
         description: Soak length in minutes (30 to 330; GitHub stops a job after 6 hours)
         type: number
         default: 30
+      allocator:
+        description: Allocator the soak's server runs on
+        type: choice
+        options: [jemalloc, system]
+        default: jemalloc
 
 permissions:
   contents: read
@@ -173,11 +178,14 @@ jobs:
   # The horoscope example (fork, branch, join, two backend calls per request)
   # at 5,000 requests per second for 30 minutes. Fails if memory, open file
   # descriptors or threads keep growing after warm-up, if more than 0.1% of
-  # requests fail, or if the server panics (see scripts/soak.sh). A manual
-  # run can soak longer (soak_minutes, up to 5.5 hours: GitHub stops jobs
-  # after 6); the 24-hour soak before a release runs on fixed hardware.
+  # requests fail, or if the server panics (see scripts/soak.sh). It runs on
+  # jemalloc, as recommended for production, whose statistics separate the
+  # bytes in use (a leak) from memory held for reuse. A manual run can soak
+  # longer (soak_minutes, up to 5.5 hours: GitHub stops jobs after 6) or on
+  # the system allocator; the 24-hour soak before a release runs on fixed
+  # hardware.
   soak:
-    name: ${{ inputs.soak_minutes || 30 }}-minute soak
+    name: ${{ inputs.soak_minutes || 30 }}-minute soak (${{ inputs.allocator || 'jemalloc' }})
     needs: base
     if: needs.base.outputs.sha != '' || inputs.force
     runs-on: ubuntu-latest
@@ -188,7 +196,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install oha (the version scripts/soak.sh reads the report of)
         run: cargo install oha --version 1.17.0 --locked
-      - run: cargo build --release -p forkline-horoscope --bins
+      - name: build the horoscope example
+        env:
+          ALLOCATOR: ${{ inputs.allocator || 'jemalloc' }}
+        run: |
+          if [ "$ALLOCATOR" = jemalloc ]; then features="--features jemalloc"; else features=""; fi
+          cargo build --release -p forkline-horoscope --bins $features
       - name: soak
         env:
           MINUTES: ${{ inputs.soak_minutes || 30 }}
