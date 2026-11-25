@@ -137,6 +137,10 @@ see "Before 1.0.0" for what remains.
   grow, when answers are not 2xx, or when the server panics or stops, keeps
   oha's errors, and writes `summary.txt`. Memory fails only past 10% and
   8 MB: on a 12 MB process the allocator's steps alone exceed 10%.
+  File descriptors and threads are compared by their floor (the lowest
+  count per quarter), since connection pools make the peaks swing: on
+  GitHub the outgoing pool to the backend moved between about 20 and 126
+  connections while incoming connections stayed at 64.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`

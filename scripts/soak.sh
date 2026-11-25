@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Soak test: run the horoscope example under steady load and sample the
 # server's memory, threads and open file descriptors. Fails if, between the
-# second quarter of the run (after warm-up) and the last, memory grows more
-# than 10% and more than 8 MB, open file descriptors more than 10% + 16, or threads more than
-# 25% + 8; if fewer than 99.9% of requests succeed; or if the server panics
+# second quarter of the run (after warm-up) and the last, average memory grows
+# more than 10% and more than 8 MB, or the lowest count of open file
+# descriptors grows more than 10% + 16 or of threads more than 25% + 8
+# (connection pools make the peaks swing; a leak raises the floor); if more
+# than 0.1% of requests fail or get a non-2xx answer; or if the server panics
 # or stops before the end.
 #
 #   scripts/soak.sh [duration_seconds=86400] [rate_per_second=5000] [out_dir=target/soak]
@@ -101,12 +103,19 @@ print(f"rss: start {rss[0]} kB, second quarter {early:.0f} kB, last quarter {lat
 # (100 bytes a request is 900 MB in 30 minutes) is far past both.
 if growth >= 10 and late - early > 8192:
     problems.append(f"memory grew {growth:+.1f}% ({(late - early) / 1024:.1f} MB)")
+# File descriptors and threads are compared by their floor, the lowest count
+# in each quarter: connection pools and Tokio's blocking pool grow under
+# bursts and shrink when idle, so peaks move around, but a leak never gives
+# its descriptor or thread back and so raises the floor.
 for column, pct, slack in (("fds", 10, 16), ("threads", 25, 8)):
     values, first_q, last_q = quarters(column)
-    limit = max(first_q) * (1 + pct / 100) + slack
-    print(f"{column}: start {values[0]}, second-quarter max {max(first_q)}, last-quarter max {max(last_q)} (limit {limit:.0f})")
-    if max(last_q) > limit:
-        problems.append(f"{column} grew from {max(first_q)} to {max(last_q)}")
+    limit = min(first_q) * (1 + pct / 100) + slack
+    print(
+        f"{column}: start {values[0]}, second quarter {min(first_q)}-{max(first_q)}, "
+        f"last quarter {min(last_q)}-{max(last_q)} (last floor limit {limit:.0f})"
+    )
+    if min(last_q) > limit:
+        problems.append(f"the {column} floor rose from {min(first_q)} to {min(last_q)}")
 
 d = json.load(open(f"{out}/oha.json")); s = d["summary"]; p = d["latencyPercentiles"]
 total = sum(d["statusCodeDistribution"].values())

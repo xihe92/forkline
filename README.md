@@ -439,8 +439,9 @@ Release builds on an Apple M5 laptop, client ([oha](https://github.com/hatoo/oha
 `scripts/soak.sh [seconds] [rate]` runs the horoscope example at a steady
 rate and samples the server's memory, threads and file descriptors (Linux or
 macOS). Comparing the second quarter of the run (after warm-up) with the last,
-it fails if memory grows more than 10% and more than 8 MB, file descriptors
-more than 10% + 16 or threads more than 25% + 8; if more than 0.1% of requests
+it fails if memory grows more than 10% and more than 8 MB, or the lowest
+count of file descriptors more than 10% + 16 or of threads more than 25% + 8
+(pools make the peaks swing; a leak raises the floor); if more than 0.1% of requests
 fail; or if the server panics or stops. The nightly CI run includes it, for
 30 minutes at 5,000 req/s, whenever `main` changed in more than docs since the
 last successful nightly run (as does the benchmark gate).
