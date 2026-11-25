@@ -437,8 +437,12 @@ Release builds on an Apple M5 laptop, client ([oha](https://github.com/hatoo/oha
 | horoscope (fork, branch, join, 2 backend HTTP calls per request) | 58,500 req/s | 1.06 ms | 1.97 ms | 3.15 ms | 0 |
 
 `scripts/soak.sh [seconds] [rate]` runs the horoscope example at a steady
-rate and samples the server's memory, threads and file descriptors; it fails
-if memory grows more than 10% between the second and last quarter of the run.
+rate and samples the server's memory, threads and file descriptors (Linux or
+macOS). Comparing the second quarter of the run (after warm-up) with the last,
+it fails if memory grows more than 10% and more than 8 MB, file descriptors
+more than 10% + 16 or threads more than 25% + 8; if more than 0.1% of requests
+fail; or if the server panics or stops. A weekly CI job
+(`.github/workflows/weekly.yml`) runs it for 30 minutes at 5,000 req/s.
 A 10-minute run at 5,000 req/s served 3,000,000 requests with no errors
 (p99 1.04 ms) and memory flat at 24 MB (+0.2%). A 24-hour run is still to do
 before 1.0.0.

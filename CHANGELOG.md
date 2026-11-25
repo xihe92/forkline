@@ -129,6 +129,12 @@ see "Before 1.0.0" for what remains.
   because gRPC closes each stream at once. A reset-versus-close race after a
   client's GOAWAY fails two more tests now and then. Each is listed with its
   reason in `scripts/h2spec-allow.txt`; any other failure fails the job.
+- Weekly 30-minute soak in CI (`.github/workflows/weekly.yml`): the horoscope
+  example at 5,000 req/s. `scripts/soak.sh` now runs on Linux too (threads and
+  file descriptors from `/proc`), also fails when file descriptors or threads
+  grow, when answers are not 2xx, or when the server panics or stops, keeps
+  oha's errors, and writes `summary.txt`. Memory fails only past 10% and
+  8 MB: on a 12 MB process the allocator's steps alone exceed 10%.
 - `ErrorKind::Overloaded` (HTTP 503, gRPC `RESOURCE_EXHAUSTED`, TCP status 4)
   for work refused because a resource is full, such as a pool's queue.
 - `check --config server.toml`, and a `config` argument on `App::check_files`
