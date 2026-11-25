@@ -19,6 +19,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      # --all-targets includes tests, examples and benchmarks, so a change that
+      # breaks the benchmark code fails here; the benchmarks run nightly.
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -78,17 +80,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
-
-  # The benchmark gate runs nightly (.github/workflows/nightly.yml); this
-  # only checks that the benchmarks still build.
-  bench-build:
-    name: benchmarks build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --workspace --no-run
 
   fuzz:
     name: short fuzz run

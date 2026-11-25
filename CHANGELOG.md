@@ -193,7 +193,8 @@ see "Before 1.0.0" for what remains.
   (`.github/workflows/nightly.yml`), which benchmarks `main` against the
   commit the previous successful nightly run tested, back to back in one job,
   reruns once before failing on a regression over 10%, and skips when `main`
-  hasn't changed. Pull requests still check that the benchmarks build. The
+  hasn't changed. Pull requests compile the benchmark code through clippy's
+  `--all-targets`. The
   latency run now fails when the 7-node fork/join plan's p99 is over 50 µs.
 - Leak checks: every server test that stops its server checks that no
   request is still in flight on any listener or in admission control while
