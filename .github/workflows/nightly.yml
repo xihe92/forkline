@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "17 3 * * *" # 03:17 UTC
   workflow_dispatch:
+    inputs:
+      force:
+        description: Run the soak even if main is unchanged since the last successful nightly run
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,8 +22,11 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # The commit the last successful nightly run tested. Empty when main
-  # hasn't changed since, so the benchmark job is skipped.
+  # The commit the last successful nightly run tested, or empty when main
+  # hasn't changed since in anything but docs (*.md), the licence files or
+  # the manual Kafka benchmark: then the benchmark gate and the soak are
+  # skipped. After a failed night the next one runs again, since the base is
+  # the last successful run. Fuzzing, h2spec and the blocking check always run.
   base:
     runs-on: ubuntu-latest
     outputs:
@@ -38,8 +46,19 @@ jobs:
             echo "No earlier successful nightly run; comparing with the previous commit $base."
           fi
           if [ "$base" = "$(git rev-parse HEAD)" ]; then
-            echo "main is unchanged since the last nightly run ($base); skipping the benchmarks."
+            echo "main is unchanged since the last successful nightly run ($base)."
             base=""
+          elif changed=$(git diff --name-only "$base" HEAD 2>/dev/null); then
+            code=$(printf '%s\n' "$changed" | grep -vE '\.md$|^LICENSE-|^benchmarks/' || true)
+            if [ -z "$code" ]; then
+              echo "Only docs changed since $base:"; printf '%s\n' "$changed"
+              base=""
+            else
+              echo "Changed since $base:"; printf '%s\n' "$code"
+            fi
+          fi
+          if [ -z "$base" ]; then
+            echo "Skipping the benchmark gate and the soak."
           fi
           echo "sha=$base" >> "$GITHUB_OUTPUT"
 
@@ -146,3 +165,34 @@ jobs:
         with:
           name: h2spec
           path: target/h2spec/
+
+  # The horoscope example (fork, branch, join, two backend calls per request)
+  # at 5,000 requests per second for 30 minutes. Fails if memory, open file
+  # descriptors or threads keep growing after warm-up, if more than 0.1% of
+  # requests fail, or if the server panics (see scripts/soak.sh). The 24-hour
+  # soak before a release runs on fixed hardware instead: GitHub stops jobs
+  # after 6 hours.
+  soak:
+    name: 30-minute soak
+    needs: base
+    if: needs.base.outputs.sha != '' || inputs.force
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install oha (the version scripts/soak.sh reads the report of)
+        run: cargo install oha --version 1.17.0 --locked
+      - run: cargo build --release -p forkline-horoscope --bins
+      - run: scripts/soak.sh 1800 5000 target/soak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak
+          path: |
+            target/soak/samples.csv
+            target/soak/summary.txt
+            target/soak/oha.err
+            target/soak/server.log
+            target/soak/metrics.txt

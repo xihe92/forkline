@@ -441,8 +441,9 @@ rate and samples the server's memory, threads and file descriptors (Linux or
 macOS). Comparing the second quarter of the run (after warm-up) with the last,
 it fails if memory grows more than 10% and more than 8 MB, file descriptors
 more than 10% + 16 or threads more than 25% + 8; if more than 0.1% of requests
-fail; or if the server panics or stops. A weekly CI job
-(`.github/workflows/weekly.yml`) runs it for 30 minutes at 5,000 req/s.
+fail; or if the server panics or stops. The nightly CI run includes it, for
+30 minutes at 5,000 req/s, whenever `main` changed in more than docs since the
+last successful nightly run (as does the benchmark gate).
 A 10-minute run at 5,000 req/s served 3,000,000 requests with no errors
 (p99 1.04 ms) and memory flat at 24 MB (+0.2%). A 24-hour run is still to do
 before 1.0.0.
