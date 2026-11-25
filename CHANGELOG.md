@@ -132,7 +132,8 @@ see "Before 1.0.0" for what remains.
 - 30-minute soak in the nightly CI run: the horoscope example at 5,000
   req/s. It and the benchmark gate run only when `main` changed in more than
   docs (`*.md`, licence files, the manual Kafka benchmark) since the last
-  successful nightly run; a manual run can force the soak. `scripts/soak.sh` now runs on Linux too (threads and
+  successful nightly run; a manual run can force the soak and set its
+  length (`soak_minutes`, up to 330). `scripts/soak.sh` now runs on Linux too (threads and
   file descriptors from `/proc`), also fails when file descriptors or threads
   grow, when answers are not 2xx, or when the server panics or stops, keeps
   oha's errors, and writes `summary.txt`. Memory fails only past 10% and
