@@ -54,7 +54,7 @@ Each node:
 | `rename` | table | `{}` | Contract keys renamed for this node: `{ local = "plan_key" }` |
 | `spawn` | boolean | `false` | On a fork: run each path on its own task (for CPU-heavy paths) |
 
-Names of plans, nodes and labels are letters, digits, `_` and `-`.
+Node names and labels used in `links` are letters, digits, `_` and `-`.
 
 ## Renaming keys
 
