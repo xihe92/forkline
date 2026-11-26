@@ -1,0 +1,80 @@
+# The plans the book's examples use. tests/plans.rs runs every load-time
+# check on them with the modules in src/lib.rs.
+
+# ANCHOR: quote
+# Price an order: standard (flag 1) or express (flag 2) delivery.
+[plans.quote]
+root = "decode"
+terminal = "error"
+time_budget_ms = 100
+links = [
+  "decode -> route",
+  "route -> standard : standard",
+  "route -> express : express",
+  "standard -> merge", "express -> merge",
+  "merge -> encode",
+]
+
+[plans.quote.nodes]
+decode   = { module = "OrderDecoder" }
+route    = { module = "ByFlag" }
+standard = { module = "Delivery", config = { charge_cents = 499 } }
+express  = { module = "Delivery", config = { charge_cents = 1499 } }
+merge    = { module = "Rejoin" }
+encode   = { module = "QuoteEncoder" }
+error    = { module = "JsonError" }
+# ANCHOR_END: quote
+
+# ANCHOR: notify
+# Price the order and, at the same time, notify on each channel it lists.
+[plans.notify]
+root = "decode"
+terminal = "error"
+time_budget_ms = 200
+links = [
+  "decode -> price", "decode -> channels",
+  "channels -> email : email", "channels -> sms : sms",
+  "email -> receipts", "sms -> receipts",
+  "price -> collect", "receipts -> collect",
+  "collect -> encode",
+]
+
+[plans.notify.nodes]
+decode   = { module = "OrderDecoder" }
+price    = { module = "Delivery", config = { charge_cents = 499 } }
+channels = { module = "Channels" }
+email    = { module = "Notify", config = { channel = "email" }, rename = { receipt = "email_receipt" } }
+sms      = { module = "Notify", config = { channel = "sms" }, rename = { receipt = "sms_receipt" } }
+receipts = { module = "Receipts" }
+collect  = { module = "Rejoin" }
+encode   = { module = "QuoteEncoder" }
+error    = { module = "JsonError" }
+# ANCHOR_END: notify
+
+# ANCHOR: price
+# The subplan: the order's price as plain text.
+[plans.price]
+root = "decode"
+terminal = "error"
+time_budget_ms = 50
+links = ["decode -> subtotal", "subtotal -> encode"]
+
+[plans.price.nodes]
+decode   = { module = "OrderDecoder" }
+subtotal = { module = "Subtotal", config = { pool = "pricing" } }
+encode   = { module = "PriceText" }
+error    = { module = "JsonError" }
+
+# Calls the `price` plan from a module.
+[plans.checkout]
+root = "decode"
+terminal = "error"
+time_budget_ms = 100
+links = ["decode -> price", "price -> encode"]
+
+[plans.checkout.nodes]
+decode = { module = "OrderDecoder" }
+price  = { module = "PriceViaPlan" }
+encode = { module = "QuoteEncoder" }
+error  = { module = "JsonError" }
+# ANCHOR_END: price

@@ -81,6 +81,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # The reference book (docs/). Its code samples are the docs/snippets crate,
+  # which the test job compiles and tests; this builds the book from them and
+  # fails on a broken internal link.
+  docs:
+    name: reference book
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install mdbook --version 0.5.4 --locked
+      - run: mdbook build docs
+      - run: python3 scripts/check-book-links.py docs/book
+
   fuzz:
     name: short fuzz run
     runs-on: ubuntu-latest

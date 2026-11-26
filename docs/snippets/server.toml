@@ -1,0 +1,9 @@
+# ANCHOR: server
+[[http]]
+addr = "127.0.0.1:8080"
+routes = { "/quote" = "quote", "/notify" = "notify", "/checkout" = "checkout" }
+
+[pools.pricing]
+threads = 2
+queue = 256
+# ANCHOR_END: server

@@ -1,0 +1,21 @@
+[book]
+title = "Forkline Reference"
+description = "The reference manual for Forkline, a Rust plan engine for backend services."
+authors = ["The Forkline Authors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/xihe92/forkline"
+edit-url-template = "https://github.com/xihe92/forkline/edit/main/docs/{path}"
+site-url = "/forkline/"
+no-section-label = false
+
+[output.html.search]
+limit-results = 20
+
+[output.html.playground]
+runnable = false
