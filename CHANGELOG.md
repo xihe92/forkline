@@ -142,6 +142,13 @@ see "Before 1.0.0" for what remains.
   count per quarter), since connection pools make the peaks swing: on
   GitHub the outgoing pool to the backend moved between about 20 and 126
   connections while incoming connections stayed at 64.
+- A reference book in `docs/` (mdBook), modelled on the Spring WebFlux
+  reference: Getting started (with a Spring concept map), Core, Services,
+  Server, Testing and an appendix of every config key, metric and error kind.
+  Its samples are the `docs/snippets` crate, whose tests run them and fail
+  when a config key or metric is missing from the appendix; CI builds the book
+  and checks its links. The README is now a short front page, and the crate
+  layout and development checks moved to `CONTRIBUTING.md`.
 - `jemalloc` feature: `/metrics` exports jemalloc's statistics
   (`forkline_allocator_allocated_bytes`, `_active_bytes`, `_resident_bytes`)
   through `tikv-jemalloc-ctl` (TiKV). The horoscope example gained a
