@@ -114,6 +114,7 @@ impl Decode for RequestDecoder {
     }
 }
 
+// ANCHOR: lookup
 /// Config for the lookups: which service to call.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +144,7 @@ impl Module for TimeLookup {
         Ok(())
     }
 }
+// ANCHOR_END: lookup
 
 /// Picks `horoscope` or `stock`.
 #[derive(Debug)]
