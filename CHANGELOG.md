@@ -148,7 +148,13 @@ see "Before 1.0.0" for what remains.
   Its samples are the `docs/snippets` crate, whose tests run them and fail
   when a config key or metric is missing from the appendix; CI builds the book
   and checks its links. The README is now a short front page, and the crate
-  layout and development checks moved to `CONTRIBUTING.md`.
+  layout and development checks moved to `CONTRIBUTING.md`. The book and the
+  API docs are published to GitHub Pages from `main`
+  (https://xihe92.github.io/forkline/).
+- The compatibility policy: Semantic Versioning from 1.0.0 over the public
+  Rust API, the three config formats, and metric and label names; release
+  candidates are not covered; the minimum Rust version rises only in a minor
+  release, announced six months ahead.
 - `jemalloc` feature: `/metrics` exports jemalloc's statistics
   (`forkline_allocator_allocated_bytes`, `_active_bytes`, `_resident_bytes`)
   through `tikv-jemalloc-ctl` (TiKV). The horoscope example gained a

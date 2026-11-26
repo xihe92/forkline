@@ -31,7 +31,8 @@ note naming the closest Spring WebFlux or Spring Boot feature and how
 Forkline differs; [Coming from Spring](coming-from-spring.md) collects them in
 one table.
 
-The Rust API is documented separately in the API docs. The source, issues and
+The Rust API is documented separately in the
+[API docs](https://xihe92.github.io/forkline/api/forkline/). The source, issues and
 changelog are in the [GitHub repository](https://github.com/xihe92/forkline).
 
 ## Licence

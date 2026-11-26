@@ -1,0 +1,60 @@
+# Publish the reference book and the API docs to GitHub Pages:
+# https://xihe92.github.io/forkline/ (book) and /api/ (rustdoc).
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "crates/**"
+      - "examples/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-book-links.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push replaces a queued one, never a running one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build the book and the API docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install mdbook --version 0.5.4 --locked
+      - run: mdbook build docs
+      - run: python3 scripts/check-book-links.py docs/book
+      - name: API docs
+        run: |
+          cargo doc --no-deps --all-features \
+            -p forkline -p forkline-core -p forkline-macros -p forkline-plan \
+            -p forkline-engine -p forkline-services -p forkline-server -p forkline-testkit
+          cp -r target/doc docs/book/api
+          printf '<!doctype html><meta charset="utf-8"><title>Forkline API</title><meta http-equiv="refresh" content="0; url=forkline/"><a href="forkline/">Forkline API docs</a>\n' > docs/book/api/index.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

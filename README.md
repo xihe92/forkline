@@ -26,11 +26,13 @@ links = [
 
 ## Documentation
 
-The reference manual is an mdBook in [`docs/`](docs/src/introduction.md),
-modelled on the Spring WebFlux reference: concepts, every config key, metric
-and error kind, and a page for readers coming from Spring. Read it locally
-with `mdbook serve docs`. Its code samples are compiled and tested
-(`docs/snippets`).
+- [Reference manual](https://xihe92.github.io/forkline/), modelled on the
+  Spring WebFlux reference: concepts, every config key, metric and error
+  kind, and a page for readers coming from Spring. Its source is in
+  [`docs/`](docs/src/introduction.md), and its code samples are compiled and
+  tested (`docs/snippets`).
+- [API docs](https://xihe92.github.io/forkline/api/forkline/) for the
+  `forkline*` crates.
 
 ## Features
 
