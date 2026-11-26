@@ -1,0 +1,20 @@
+# Every key of the built-in kinds and the shared layers.
+
+[services.inventory]
+kind = "http"
+url = "http://inventory.internal:8080/"
+connect_timeout_ms = 200
+pool_max_idle_per_host = 64
+timeout_ms = 40                   # per attempt; the request deadline also applies
+retries = 1                       # after a timeout, transport error or 502/503/504
+retry_budget_percent = 20         # retries add at most 20% more calls
+retry_backoff_ms = 0
+concurrency_limit = 256
+load_shed = true                  # at the limit, fail at once instead of waiting
+breaker = { failures = 20, open_ms = 1000 }
+
+[services.ranking]
+kind = "grpc"
+url = "http://ranking.internal:50051"
+connect_timeout_ms = 200
+timeout_ms = 30

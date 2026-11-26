@@ -20,6 +20,7 @@ fn the_books_plans_pass_every_check() {
     App::new(registry().unwrap()).assert_files_valid(Some(Path::new(&file("server.toml"))), file("plans.toml"), None);
 }
 
+// ANCHOR: engine
 fn engine() -> Engine {
     let plans = PlansFile::load(file("plans.toml")).unwrap();
     let services = ServiceRegistry::new().with_pool("pricing", Pool::new("pricing", 2, 16).unwrap());
@@ -42,6 +43,7 @@ async fn quote_takes_the_branch_the_flag_picks() {
     let (_, body) = call("quote", &ORDER.replace(r#""flag":2"#, r#""flag":1"#)).await;
     assert_eq!(body["price_cents"], 700 + 499);
 }
+// ANCHOR_END: engine
 
 #[tokio::test]
 async fn a_bad_flag_is_a_bad_request_answered_by_the_terminal() {

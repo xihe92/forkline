@@ -20,7 +20,7 @@ serde_json.workspace = true
 [dev-dependencies]
 forkline-plan.workspace = true
 forkline-testkit.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "time"] }
 
 [lints]
 workspace = true

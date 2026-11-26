@@ -1,0 +1,51 @@
+# Every key, with its default where it has one.
+
+[[http]]
+addr = "0.0.0.0:8080"
+routes = { "/quote" = "quote", "/notify" = "notify" }
+max_body_bytes = 2097152          # 2 MiB; larger bodies get 413
+header_read_timeout_ms = 60000    # HTTP/1: time to send a request's headers
+idle_timeout_ms = 60000           # close connections idle this long
+
+[[grpc]]
+addr = "0.0.0.0:50051"
+methods = { Quote = "quote" }     # /forkline.v1.Plans/Quote runs plan `quote`
+idle_timeout_ms = 60000
+
+[[tcp]]
+addr = "0.0.0.0:7000"
+plan = "quote"                    # length-delimited frames, one request each
+max_frame_bytes = 1048576         # 1 MiB
+max_in_flight_per_connection = 32
+idle_timeout_ms = 60000
+
+[admin]
+addr = "127.0.0.1:6789"           # /healthz /readyz /metrics /admin/...
+allow = ["127.0.0.1/32", "::1/128"]
+
+[admission]
+red = 800                         # refuse new requests at 800 in flight...
+green = 500                       # ...until back down to 500
+max_queue_ms = 50                 # shed requests that waited longer to start
+
+[reload]
+history = 5                       # snapshots kept for rollback
+watch_interval_ms = 0             # >0: poll the files and reload on change
+
+[shutdown]
+drain_timeout_ms = 10000
+
+[pools.pricing]
+threads = 4                       # default: one per core
+queue = 1024
+
+[runtime]
+worker_threads = 8                # default: one per core
+max_blocking_threads = 512        # Tokio's default
+slow_poll_ms = 10                 # 0: off
+
+[telemetry]
+log_format = "json"               # default "text"
+filter = "info"                   # RUST_LOG overrides it
+otlp_endpoint = "http://otel-collector:4317"   # needs the `otlp` feature
+service_name = "forkline"
